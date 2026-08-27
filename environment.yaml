@@ -23,6 +23,10 @@ dependencies:
   # Model / scaler serialization
   - joblib
 
+  # For jupyter notebooks
+  - jupyterlab
+  - ipykernel
+
   # Install TensorFlow through pip in the same environment.
   # The [and-cuda] extra installs the CUDA-side Python dependencies
   # expected by current TensorFlow releases.

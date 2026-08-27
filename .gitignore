@@ -8,6 +8,11 @@ __pycache__/
 
 # Jupyter
 .ipynb_checkpoints/
+*.ipynb
+
+# Keep tutorial notebooks under version control
+!notebooks/
+!notebooks/*.ipynb
 
 # Python packaging / build artifacts
 build/
