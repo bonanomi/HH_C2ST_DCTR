@@ -109,6 +109,11 @@ c2st_final_closure/outputs/
 toy_c2st_outputs/
 toy_c2st_demo/toy_c2st_outputs/
 
+# ============================================================
+# Condor submission logs
+# ============================================================
+
+condor_jobs/
 
 # ============================================================
 # TensorFlow / ML artifacts

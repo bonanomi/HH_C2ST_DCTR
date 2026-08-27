@@ -175,33 +175,50 @@ After installation, either open a new shell or activate Miniforge manually with
 source ~/miniforge3/bin/activate
 ```
 
-It is recommended to create a dedicated environment for the C2ST/DCTR code rather than installing everything into the base environment:
+It is recommended to create a dedicated environment for the C2ST/DCTR code rather than installing dependencies manually into the base environment.
+
+The repository provides an `environment.yaml` file containing the required Python version, scientific Python stack, HEP I/O packages, and TensorFlow installation.
+
+From the repository root, create the environment with:
 
 ```bash
-conda create -n c2st python=3.11 -y
+source ~/miniforge3/bin/activate
+conda env create -f environment.yaml
+```
+
+The environment defined in `environment.yaml` is called `c2st`. Activate it with:
+
+```bash
 conda activate c2st
 ```
 
-A typical Miniforge environment can then be activated in future sessions with
+In future sessions, the environment can be activated with:
 
 ```bash
 source ~/miniforge3/bin/activate
 conda activate c2st
 ```
 
-The scientific stack used by the code includes at least:
+If `environment.yaml` is updated later, an existing environment can be synchronized with the file using:
 
 ```bash
-conda install -c conda-forge \
-    numpy pandas scipy scikit-learn matplotlib mplhep \
-    awkward pyarrow joblib
+conda env update \
+    -n c2st \
+    -f environment.yaml \
+    --prune
 ```
 
-TensorFlow is normally installed through pip in the activated environment:
+The environment includes the scientific stack used by the pipeline, including:
 
-```bash
-pip install 'tensorflow[and-cuda]'
-```
+- NumPy;
+- pandas;
+- SciPy;
+- scikit-learn;
+- Matplotlib and `mplhep`;
+- Awkward Array;
+- PyArrow;
+- `joblib`;
+- TensorFlow with CUDA support.
 
 After installation, it is useful to check that TensorFlow imports correctly:
 
@@ -209,7 +226,7 @@ After installation, it is useful to check that TensorFlow imports correctly:
 python -c "import tensorflow as tf; print(tf.__version__)"
 ```
 
-On a GPU node, you can additionally verify that TensorFlow sees the GPU:
+On a GPU node, also verify that TensorFlow can see the GPU:
 
 ```bash
 python -c "import tensorflow as tf; print(tf.config.list_physical_devices('GPU'))"
@@ -221,7 +238,7 @@ A successful GPU setup should return at least one device, for example:
 [PhysicalDevice(name='/physical_device:GPU:0', device_type='GPU')]
 ```
 
-At this point the environment should contain everything required to run the C2ST, DCTR, plotting, and validation scripts.
+At this point the environment should contain everything required to run the C2ST, DCTR, plotting, validation, and final cross-fit closure scripts.
 
 GPU acceleration matters mainly for:
 

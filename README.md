@@ -7,6 +7,12 @@ Before diving into the actual code:
 - Setup the working environment as explained [here](C2ST_DOC.md#4-environment-setup).
 - Consider starting from the [toy example](toy_c2st_demo/TOY_C2ST_GUIDE.md) to familiarize with the concepts treated in this project.
 
+## HTCondor submission
+
+The training stages of the C2ST/DCTR tests described below can be submitted as jobs with `HTCondor` using [`make_condor_submit.py`](make_condor_submit.py).
+
+Read [`CONDOR.md`](CONDOR.md) for a more detailed explanation of this script and how to use it.
+
 ## C2ST documentation
 
 The complete C2ST/DCTR workflow is documented in [`C2ST_DOC.md`](C2ST_DOC.md).

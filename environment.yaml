@@ -1,0 +1,31 @@
+name: c2st
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.11
+
+  # Core scientific Python stack
+  - numpy
+  - pandas
+  - scipy
+  - scikit-learn
+
+  # Plotting
+  - matplotlib
+  - mplhep
+
+  # HEP / columnar data handling
+  - awkward
+  - pyarrow
+
+  # Model / scaler serialization
+  - joblib
+
+  # Install TensorFlow through pip in the same environment.
+  # The [and-cuda] extra installs the CUDA-side Python dependencies
+  # expected by current TensorFlow releases.
+  - pip
+  - pip:
+      - "tensorflow[and-cuda]"
