@@ -1,0 +1,181 @@
+# ============================================================
+# Python
+# ============================================================
+
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Python packaging / build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Test / coverage caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+
+# ============================================================
+# Conda / virtual environments
+# ============================================================
+
+.env
+.venv/
+venv/
+env/
+ENV/
+
+# Local environment/config files
+.env.*
+!.env.example
+
+
+# ============================================================
+# OS-generated files
+# ============================================================
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+
+# ============================================================
+# Editors / IDEs
+# ============================================================
+
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+
+
+# ============================================================
+# Logs / temporary files
+# ============================================================
+
+*.log
+*.tmp
+*.temp
+*.bak
+
+tmp/
+temp/
+
+
+# ============================================================
+# C2ST main pipeline outputs
+# ============================================================
+
+c2st_artifacts/
+c2st_validation_plots/
+
+
+# ============================================================
+# Final cross-fitted DCTR closure outputs
+# ============================================================
+
+c2st_final_closure_artifacts/
+c2st_final_closure_plots/
+
+
+# If the closure scripts write outputs inside their own folder
+c2st_final_closure/artifacts/
+c2st_final_closure/plots/
+c2st_final_closure/outputs/
+
+
+# ============================================================
+# Toy C2ST example outputs
+# ============================================================
+
+toy_c2st_outputs/
+toy_c2st_demo/toy_c2st_outputs/
+
+
+# ============================================================
+# TensorFlow / ML artifacts
+# ============================================================
+
+# Trained Keras / TensorFlow models
+*.keras
+*.h5
+*.hdf5
+
+# TensorFlow SavedModel directories
+saved_model/
+checkpoints/
+checkpoint/
+
+# TensorBoard
+logs/
+tensorboard/
+
+
+# ============================================================
+# Generated analysis data
+# ============================================================
+
+# Saved NumPy arrays
+*.npy
+*.npz
+
+# Generated parquet tables
+*.parquet
+
+# Serialized Python/scikit-learn objects
+*.joblib
+*.pkl
+*.pickle
+
+
+# ============================================================
+# Generated plots / figures
+# ============================================================
+
+*.png
+*.pdf
+*.svg
+*.jpg
+*.jpeg
+
+
+# ============================================================
+# Batch-system / cluster output
+# ============================================================
+
+*.out
+*.err
+
+slurm-*.out
+slurm-*.err
+
+# HTCondor-style files
+*.condor.log
+
+
+# ============================================================
+# Local scratch / large data directories
+# ============================================================
+
+scratch/
+outputs/
+output/
+results/
