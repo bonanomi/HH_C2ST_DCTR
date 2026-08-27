@@ -5,7 +5,8 @@
 Before diving into the actual code:
 
 - Setup the working environment as explained [here](C2ST_DOC.md#4-environment-setup).
-- Consider starting from the [toy example](toy_c2st_demo/TOY_C2ST_GUIDE.md) to familiarize with the concepts treated in this project.
+- Familiarize with some of the basic concepts that we are going to use throughout the project by solving the [`01_histograms_weights_datamc.ipynb`](notebooks/01_histograms_weights_datamc.ipynb) notebook. Instructions on how to set up the JupyterLab interface and run it can be found in the dedicated [`README`](notebooks/README.md).
+- Start exploring the concept of Classifier Two Sample Test (C2ST) from the [toy example](toy_c2st_demo/TOY_C2ST_GUIDE.md) to have a gentle introduction to what is going to be the core part of the project.
 
 ## HTCondor submission
 
