@@ -77,3 +77,19 @@ def stage_weights(n_data_total, raw_mc_all, raw_mc_subset, n_data_subset):
     w_data = np.full(n_data_subset, global_scale, dtype=np.float32)
     w_mc = np.asarray(raw_mc_subset, dtype=np.float32) * np.float32(mc_scale * global_scale)
     return w_data, w_mc
+
+
+def normalize_signed_sample_weights(weights):
+    """Rescale signed sample weights with one common factor so mean |w| = 1.
+
+    The relative signs and event-to-event weights are untouched.  Passing the
+    returned weights to Keras binary cross entropy therefore implements a signed
+    weighted BCE while keeping its numerical scale stable.
+    """
+    weights = np.asarray(weights, dtype=np.float64)
+    if weights.ndim != 1 or len(weights) == 0:
+        raise ValueError("signed sample weights must be a non-empty 1D array")
+    sum_abs = np.sum(np.abs(weights), dtype=np.float64)
+    if not np.isfinite(sum_abs) or sum_abs <= 0:
+        raise ValueError("signed sample weights have zero/non-finite total absolute weight")
+    return weights * (len(weights) / sum_abs)

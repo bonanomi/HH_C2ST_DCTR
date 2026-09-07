@@ -233,7 +233,7 @@ neg_absw_frac
 where
 
 - `neg_event_frac` is the fraction of MC rows with `weight_uncorrected <= 0`;
-- `neg_absw_frac` is the fraction of total \(|w|\) carried by those rows.
+- `neg_absw_frac` is the fraction of total $|w|$ carried by those rows.
 
 Then it defines
 
@@ -985,7 +985,7 @@ This is the core leakage-protection property of the script.
 
 # 25. The reusable DCTR weight
 
-Once an MC event has a DCTR factor \(r_i\), its DCTR-corrected physical weight is defined as
+Once an MC event has a DCTR factor $r_i$, its DCTR-corrected physical weight is defined as
 
 $$
 w_i^{\rm DCTR}=
@@ -1225,9 +1225,9 @@ w_i^{\rm uncorrected}
 r_i^{\rm DCTR}.
 $$
 
-For outer train and validation MC, \(r_i\) is cross-fitted.
+For outer train and validation MC, $r_i$ is cross-fitted.
 
-For outer test MC, \(r_i\) comes from the final DCTR model that never saw outer test.
+For outer test MC, $r_i$ comes from the final DCTR model that never saw outer test.
 
 The closure NN asks:
 
@@ -1453,7 +1453,7 @@ does not fit on:
 
 ## Cross-fit DCTR fold model
 
-For fold \(k\):
+For fold $k$:
 
 ```text
 trains on:
@@ -1851,7 +1851,7 @@ Fit preprocessing on outer train only.
 
 ## Step 4 — cross-fit DCTR on outer train+validation
 
-Divide outer train+validation into \(K\) folds.
+Divide outer train+validation into $K$ folds.
 
 For each fold:
 
@@ -2004,3 +2004,59 @@ The three closure networks then answer the final comparison cleanly:
 > **Which MC weighting prescription leaves the least multivariate Data/MC information for a new classifier to exploit?**
 
 That is the role of `train_dctr_crossfit_closure.py`.
+
+
+---
+
+# 48. Two DCTR target definitions
+
+The cross-fit machinery now supports two targets selected with `--dctr-target`.  All outer-split, scaler, cap, factor-provenance and fresh-closure rules described above remain valid.
+
+## 48.1 `inclusive`
+
+This is the original workflow described throughout this document:
+
+```text
+Data = 1
+all pre-DY MC = 0
+```
+
+The network uses class-balanced positive weights and its factor is applied to all MC.
+
+## 48.2 `dy_only`
+
+This mode derives a correction for DY only:
+
+```text
+target class (1):
+    Data       with +1
+    non-DY MC with -weight_uncorrected
+
+source class (0):
+    DY MC      with +weight_uncorrected
+```
+
+The non-DY sign implements the MC subtraction.  The signed sample weights are rescaled by one common factor based on `sum(abs(w))` to keep the BCE scale stable; no C2ST class-balancing factor is inserted into this DCTR derivation.
+
+Data, DY and non-DY MC are independently folded inside outer train+validation.  A fold model excludes all three held-out populations and predicts only the held-out DY factors.  The cap is derived from internal-validation DY MC.  The final model for outer test is likewise trained only from outer train+validation and predicts only the outer-test DY events.
+
+The stored factor is set to 1 for every non-DY row, therefore
+
+```text
+weight_dctr = weight_uncorrected * dctr_factor
+```
+
+remains universally true while changing only DY.
+
+The closure C2ST itself does not use signed weights.  It continues to compare Data with the complete positive-weight MC mixture using the existing stage-specific class balancing.
+
+## 48.3 Direct comparison
+
+After training both targets, run
+
+```bash
+python -m c2st_final_closure.validate_dctr_crossfit_closure \
+    --dctr-target both
+```
+
+This compares the common outer-test AUCs and feature closure for `before`, official `dy`, `dctr_inclusive` and `dctr_dy_only`, and compares both learned factors on exactly the DY events in the outer test.

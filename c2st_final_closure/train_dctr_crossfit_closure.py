@@ -1,26 +1,23 @@
 from __future__ import annotations
 
-"""Train and validate an out-of-fold DCTR correction with an independent closure C2ST.
+"""Cross-fitted DCTR derivation followed by an independent closure C2ST.
 
-The workflow is deliberately separated from c2st_nn.py:
+Two DCTR targets are supported:
 
-1. Load one channel at a time and retain the same DY-VR phase space/config selections.
-2. Remove negative-weight MC *for classifier training only* (ordinary BCE needs a positive
-   sample measure). The signed-weight deployment issue is discussed in README_DCTR_CLOSURE.md.
-3. Make one OUTER train/validation/test split. The outer test set is never used to fit DCTR.
-4. Cross-fit DCTR factors on the outer train+validation population:
-      - each row receives a factor from a DCTR network that did not train on that row;
-      - each fold's cap is derived from that fold model's internal validation MC, not from the
-        held-out fold to which the cap is applied.
-5. Train one final DCTR model on outer train+validation and apply it to the untouched outer test.
-6. Train three NEW closure classifiers on exactly the same outer split:
-      before : nominal weight without the DY correction
-      dy     : nominal weight with the official DY correction
-      dctr   : nominal weight without DY correction x cross-fitted DCTR factor
-7. Evaluate all three on the exact same untouched outer test events and save their AUCs/predictions.
+``inclusive`` (the historical/default mode)
+    class 1 = Data, class 0 = all positive-weight pre-DY MC.  The learned
+    factor is applied to every MC event.
 
-The target result for a successful correction is an AUC closer to 0.5. The script does not
-assume DCTR must outperform the nominal DY correction; that is what the closure test measures.
+``dy_only``
+    class 1 = Data - non-DY MC, class 0 = DY MC.  Non-DY MC enters the
+    target class with a negative subtraction weight and only DY events receive
+    a learned DCTR factor.  Generator-level negative-weight MC events remain
+    excluded from NN training, exactly as in the historical closure workflow.
+
+Both modes use the same outer train/validation/test split, k-fold cross-fitting,
+validation-derived DCTR cap, and fresh closure classifiers.  The untouched
+outer test is never used to fit the scaler, a DCTR model, a DCTR cap, or a
+closure classifier.
 """
 
 import argparse
@@ -36,15 +33,29 @@ import tensorflow as tf
 from sklearn.metrics import roc_auc_score
 
 HERE = Path(__file__).resolve().parent
-if str(HERE) not in sys.path:
-    sys.path.insert(0, str(HERE))
+REPO_ROOT = HERE.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import c2st_config as cfg
 import dyvr_lib
-from c2st_core import apply_scaler, fit_scaler, split_class_indices, stage_weights, weighted_bce
+from c2st_core import (
+    apply_scaler,
+    fit_scaler,
+    normalize_signed_sample_weights,
+    split_class_indices,
+    stage_weights,
+    weighted_bce,
+)
 
 
 DEFAULT_OUT = cfg.ARTIFACT_DIR / "dctr_crossfit_closure"
+DCTR_TARGETS = ("inclusive", "dy_only")
+
+
+def target_root(base: Path, dctr_target: str) -> Path:
+    """Keep the historical inclusive artifact path backwards compatible."""
+    return base if dctr_target == "inclusive" else base / dctr_target
 
 
 def build_model(n_features: int, seed: int) -> tf.keras.Model:
@@ -82,8 +93,19 @@ def callbacks(verbose: int = 1):
 
 
 def channel_tables(tables: dict[str, pd.DataFrame], channel: str):
-    data_parts = [df for label, df in tables.items() if label in cfg.DATA_PROCESSES and len(df)]
-    mc_parts = [df for label, df in tables.items() if label in cfg.MC_PROCESSES and len(df)]
+    """Concatenate one channel while preserving whether each MC row is DY."""
+    data_parts = []
+    mc_parts = []
+    for label, df in tables.items():
+        if not len(df):
+            continue
+        if label in cfg.DATA_PROCESSES:
+            data_parts.append(df)
+        elif label in cfg.MC_PROCESSES:
+            tmp = df.copy()
+            tmp["is_dy"] = bool(cfg.MC_PROCESSES[label].get("is_dy", False))
+            mc_parts.append(tmp)
+
     data = pd.concat(data_parts, ignore_index=True) if data_parts else pd.DataFrame()
     mc = pd.concat(mc_parts, ignore_index=True) if mc_parts else pd.DataFrame()
     if len(data):
@@ -100,7 +122,7 @@ def maybe_subsample(df: pd.DataFrame, maximum: int | None, seed: int):
 
 
 def make_pair(x_data, idx_data, x_mc, idx_mc):
-    """Materialize one Data+MC NN matrix for the requested class-specific indices."""
+    """Materialize one Data+MC NN matrix for the requested class indices."""
     xd = x_data[idx_data]
     xm = x_mc[idx_mc]
     x = np.concatenate([xd, xm], axis=0).astype(np.float32, copy=False)
@@ -126,7 +148,7 @@ def fit_binary_model(
     seed: int,
     label: str,
 ):
-    """Fit one Data-vs-MC network using class-balanced physical MC weights."""
+    """Historical inclusive Data-vs-all-MC DCTR/closure fit."""
     x_train, y_train = make_pair(x_data, idx_data_train, x_mc, idx_mc_train)
     x_val, y_val = make_pair(x_data, idx_data_val, x_mc, idx_mc_val)
 
@@ -161,15 +183,89 @@ def fit_binary_model(
     return model
 
 
+def make_dy_only_sample(
+    x_data,
+    idx_data,
+    x_mc,
+    idx_non_dy,
+    idx_dy,
+    raw_before,
+):
+    """Build (Data - non-DY MC) vs DY with signed target weights.
+
+    Label 1 is the target distribution.  Data has +1 weight while non-DY MC
+    has -weight_uncorrected.  Label 0 is DY with +weight_uncorrected.
+    A single common normalization rescales the signed weights so mean |w|=1;
+    this does not change the signed BCE optimum but keeps the numerical loss
+    scale stable.
+    """
+    x = np.concatenate([
+        x_data[idx_data],
+        x_mc[idx_non_dy],
+        x_mc[idx_dy],
+    ], axis=0).astype(np.float32, copy=False)
+    y = np.concatenate([
+        np.ones(len(idx_data) + len(idx_non_dy), dtype=np.uint8),
+        np.zeros(len(idx_dy), dtype=np.uint8),
+    ])
+    raw_signed = np.concatenate([
+        np.ones(len(idx_data), dtype=np.float64),
+        -np.asarray(raw_before[idx_non_dy], dtype=np.float64),
+        np.asarray(raw_before[idx_dy], dtype=np.float64),
+    ])
+    w = normalize_signed_sample_weights(raw_signed).astype(np.float32, copy=False)
+    return x, y, w
+
+
+def fit_dy_only_model(
+    x_data,
+    idx_data_train,
+    idx_data_val,
+    x_mc,
+    idx_non_dy_train,
+    idx_non_dy_val,
+    idx_dy_train,
+    idx_dy_val,
+    raw_before,
+    seed: int,
+    label: str,
+):
+    """Fit DY vs (Data - non-DY) using signed sample weights."""
+    x_train, y_train, w_train = make_dy_only_sample(
+        x_data, idx_data_train, x_mc, idx_non_dy_train, idx_dy_train, raw_before
+    )
+    x_val, y_val, w_val = make_dy_only_sample(
+        x_data, idx_data_val, x_mc, idx_non_dy_val, idx_dy_val, raw_before
+    )
+
+    model = build_model(x_train.shape[1], seed)
+    print(
+        f"=== {label}: train={len(y_train):_}, val={len(y_val):_}, "
+        f"batch={cfg.BATCH_SIZE:_}, signed target weights ==="
+    )
+    model.fit(
+        x_train,
+        y_train,
+        sample_weight=w_train,
+        validation_data=(x_val, y_val, w_val),
+        epochs=cfg.EPOCHS,
+        batch_size=cfg.BATCH_SIZE,
+        callbacks=callbacks(),
+        verbose=2,
+    )
+
+    del x_train, y_train, w_train, x_val, y_val, w_val
+    gc.collect()
+    return model
+
+
 def dctr_from_probability(p, eps: float):
     p = np.clip(np.asarray(p, dtype=np.float64), eps, 1.0 - eps)
     return p / (1.0 - p)
 
 
 def cap_from_validation(model, x_mc, idx_mc_val, quantile, eps):
-    if quantile is None:
-        return None
-    if len(idx_mc_val) == 0:
+    if quantile is None or len(idx_mc_val) == 0:
         return None
     p = model.predict(x_mc[idx_mc_val], batch_size=cfg.BATCH_SIZE, verbose=0).reshape(-1)
     factors = dctr_from_probability(p, eps)
@@ -180,6 +276,8 @@ def cap_from_validation(model, x_mc, idx_mc_val, quantile, eps):
 
 
 def predict_dctr(model, x_mc, indices, cap_value, eps):
+    if len(indices) == 0:
+        return np.empty(0, dtype=np.float32)
     p = model.predict(x_mc[indices], batch_size=cfg.BATCH_SIZE, verbose=0).reshape(-1)
     factor = dctr_from_probability(p, eps)
     if cap_value is not None:
@@ -194,17 +292,30 @@ def shuffled_folds(indices: np.ndarray, n_folds: int, seed: int):
     return [np.asarray(x, dtype=np.int64) for x in np.array_split(shuffled, n_folds)]
 
 
-def inner_train_val(indices: np.ndarray, val_fraction: float, seed: int):
-    rng = np.random.default_rng(seed)
+def inner_train_val(indices: np.ndarray, val_fraction: float, seed: int, allow_empty: bool = False):
     indices = np.asarray(indices, dtype=np.int64).copy()
+    if len(indices) == 0:
+        if allow_empty:
+            return indices, indices
+        raise ValueError("Cannot split an empty population")
+    if len(indices) == 1:
+        if allow_empty:
+            return indices, np.empty(0, dtype=np.int64)
+        raise ValueError("Need at least two events for an internal train/validation split")
+    rng = np.random.default_rng(seed)
     rng.shuffle(indices)
     n_val = max(1, int(round(val_fraction * len(indices))))
     if n_val >= len(indices):
-        n_val = max(1, len(indices) - 1)
+        n_val = len(indices) - 1
     return indices[n_val:], indices[:n_val]
 
 
-def crossfit_dctr_trainval(
+def _concat_other_folds(folds, held_out: int):
+    pieces = [folds[j] for j in range(len(folds)) if j != held_out and len(folds[j])]
+    return np.concatenate(pieces) if pieces else np.empty(0, dtype=np.int64)
+
+
+def crossfit_dctr_trainval_inclusive(
     x_data,
     data_trainval,
     x_mc,
@@ -216,12 +327,7 @@ def crossfit_dctr_trainval(
     seed: int,
     save_fold_models_dir: Path | None = None,
 ):
-    """Out-of-fold DCTR factors for the OUTER train+validation MC population.
-
-    Each held-out MC fold receives predictions from a classifier that did not train on that fold.
-    Data is folded in parallel so the held-out DCTR evaluation population is class-independent.
-    Only MC DCTR factors are needed downstream.
-    """
+    """Historical out-of-fold Data-vs-all-MC factors."""
     data_folds = shuffled_folds(data_trainval, n_folds, seed)
     mc_folds = shuffled_folds(mc_trainval, n_folds, seed + 1000)
     factors = np.full(len(x_mc), np.nan, dtype=np.float32)
@@ -229,10 +335,9 @@ def crossfit_dctr_trainval(
     cap_values = []
 
     for k in range(n_folds):
-        hold_d = data_folds[k]
         hold_m = mc_folds[k]
-        cand_d = np.concatenate([data_folds[j] for j in range(n_folds) if j != k])
-        cand_m = np.concatenate([mc_folds[j] for j in range(n_folds) if j != k])
+        cand_d = _concat_other_folds(data_folds, k)
+        cand_m = _concat_other_folds(mc_folds, k)
 
         train_d, val_d = inner_train_val(cand_d, cfg.VAL_SIZE_WITHIN_TRAINVAL, seed + 10 * k + 1)
         train_m, val_m = inner_train_val(cand_m, cfg.VAL_SIZE_WITHIN_TRAINVAL, seed + 10 * k + 2)
@@ -242,48 +347,106 @@ def crossfit_dctr_trainval(
             x_mc, train_m, val_m,
             raw_before,
             seed + k,
-            label=f"DCTR cross-fit fold {k + 1}/{n_folds}",
+            label=f"DCTR inclusive cross-fit fold {k + 1}/{n_folds}",
         )
         cap_value = cap_from_validation(model, x_mc, val_m, cap_quantile, eps)
         fold_factor = predict_dctr(model, x_mc, hold_m, cap_value, eps)
         factors[hold_m] = fold_factor
         fold_id[hold_m] = k
         cap_values.append(cap_value)
-
         print(
             f"  fold {k + 1}: held-out MC={len(hold_m):_}, "
             f"cap={cap_value if cap_value is not None else 'none'}, "
-            f"factor mean={float(np.mean(fold_factor)):.5g}, "
-            f"max={float(np.max(fold_factor)):.5g}"
+            f"factor mean={float(np.mean(fold_factor)):.5g}, max={float(np.max(fold_factor)):.5g}"
         )
-
         if save_fold_models_dir is not None:
             save_fold_models_dir.mkdir(parents=True, exist_ok=True)
             model.save(save_fold_models_dir / f"dctr_fold_{k}.keras")
-
-        del model, hold_d, hold_m, cand_d, cand_m, train_d, val_d, train_m, val_m, fold_factor
+        del model, cand_d, cand_m, train_d, val_d, train_m, val_m, fold_factor
         tf.keras.backend.clear_session()
         gc.collect()
 
     if np.any(~np.isfinite(factors[mc_trainval])):
         missing = int(np.sum(~np.isfinite(factors[mc_trainval])))
         raise RuntimeError(f"Cross-fitting failed to assign DCTR factors to {missing} train/val MC rows")
-
     return factors, fold_id, cap_values
 
 
-def fit_final_dctr_for_outer_test(
+def crossfit_dctr_trainval_dy_only(
     x_data,
     data_trainval,
     x_mc,
     mc_trainval,
-    mc_test,
+    is_dy,
     raw_before,
-    cap_quantile,
-    eps,
-    seed,
+    n_folds: int,
+    cap_quantile: float | None,
+    eps: float,
+    seed: int,
+    save_fold_models_dir: Path | None = None,
 ):
-    """Fit a final DCTR model with NO outer-test events and predict the outer-test MC."""
+    """Out-of-fold factors for DY using (Data - non-DY MC) as the target."""
+    dy_trainval = mc_trainval[is_dy[mc_trainval]]
+    non_dy_trainval = mc_trainval[~is_dy[mc_trainval]]
+    if len(dy_trainval) < n_folds * 2 or len(data_trainval) < n_folds * 2:
+        raise ValueError("Not enough Data/DY events for the requested number of DY-only folds")
+
+    data_folds = shuffled_folds(data_trainval, n_folds, seed)
+    dy_folds = shuffled_folds(dy_trainval, n_folds, seed + 1000)
+    non_dy_folds = shuffled_folds(non_dy_trainval, n_folds, seed + 2000)
+
+    # Non-DY events are deliberately left at factor 1.  Only DY receives a learned correction.
+    factors = np.ones(len(x_mc), dtype=np.float32)
+    fold_id = np.full(len(x_mc), -1, dtype=np.int16)
+    cap_values = []
+
+    for k in range(n_folds):
+        hold_dy = dy_folds[k]
+        cand_d = _concat_other_folds(data_folds, k)
+        cand_dy = _concat_other_folds(dy_folds, k)
+        cand_non = _concat_other_folds(non_dy_folds, k)
+
+        train_d, val_d = inner_train_val(cand_d, cfg.VAL_SIZE_WITHIN_TRAINVAL, seed + 10 * k + 1)
+        train_dy, val_dy = inner_train_val(cand_dy, cfg.VAL_SIZE_WITHIN_TRAINVAL, seed + 10 * k + 2)
+        train_non, val_non = inner_train_val(
+            cand_non, cfg.VAL_SIZE_WITHIN_TRAINVAL, seed + 10 * k + 3, allow_empty=True
+        )
+
+        model = fit_dy_only_model(
+            x_data, train_d, val_d,
+            x_mc, train_non, val_non, train_dy, val_dy,
+            raw_before,
+            seed + k,
+            label=f"DCTR DY-only cross-fit fold {k + 1}/{n_folds}",
+        )
+        cap_value = cap_from_validation(model, x_mc, val_dy, cap_quantile, eps)
+        fold_factor = predict_dctr(model, x_mc, hold_dy, cap_value, eps)
+        factors[hold_dy] = fold_factor
+        fold_id[hold_dy] = k
+        cap_values.append(cap_value)
+        print(
+            f"  fold {k + 1}: held-out DY={len(hold_dy):_}, "
+            f"cap={cap_value if cap_value is not None else 'none'}, "
+            f"factor mean={float(np.mean(fold_factor)):.5g}, max={float(np.max(fold_factor)):.5g}"
+        )
+        if save_fold_models_dir is not None:
+            save_fold_models_dir.mkdir(parents=True, exist_ok=True)
+            model.save(save_fold_models_dir / f"dctr_fold_{k}.keras")
+        del model, cand_d, cand_dy, cand_non, train_d, val_d, train_dy, val_dy, train_non, val_non
+        del fold_factor
+        tf.keras.backend.clear_session()
+        gc.collect()
+
+    if np.any(~np.isfinite(factors[dy_trainval])):
+        missing = int(np.sum(~np.isfinite(factors[dy_trainval])))
+        raise RuntimeError(f"DY-only cross-fitting failed to assign {missing} train/val DY factors")
+    return factors, fold_id, cap_values
+
+
+def fit_final_dctr_for_outer_test_inclusive(
+    x_data, data_trainval, x_mc, mc_trainval, mc_test, raw_before,
+    cap_quantile, eps, seed,
+):
     train_d, val_d = inner_train_val(data_trainval, cfg.VAL_SIZE_WITHIN_TRAINVAL, seed + 3001)
     train_m, val_m = inner_train_val(mc_trainval, cfg.VAL_SIZE_WITHIN_TRAINVAL, seed + 3002)
     model = fit_binary_model(
@@ -291,11 +454,36 @@ def fit_final_dctr_for_outer_test(
         x_mc, train_m, val_m,
         raw_before,
         seed + 3000,
-        label="DCTR final model for untouched outer test",
+        label="DCTR inclusive final model for untouched outer test",
     )
     cap_value = cap_from_validation(model, x_mc, val_m, cap_quantile, eps)
     factor_test = predict_dctr(model, x_mc, mc_test, cap_value, eps)
     return model, factor_test, cap_value
+
+
+def fit_final_dctr_for_outer_test_dy_only(
+    x_data, data_trainval, x_mc, mc_trainval, mc_test, is_dy, raw_before,
+    cap_quantile, eps, seed,
+):
+    dy_trainval = mc_trainval[is_dy[mc_trainval]]
+    non_trainval = mc_trainval[~is_dy[mc_trainval]]
+    dy_test = mc_test[is_dy[mc_test]]
+
+    train_d, val_d = inner_train_val(data_trainval, cfg.VAL_SIZE_WITHIN_TRAINVAL, seed + 3001)
+    train_dy, val_dy = inner_train_val(dy_trainval, cfg.VAL_SIZE_WITHIN_TRAINVAL, seed + 3002)
+    train_non, val_non = inner_train_val(
+        non_trainval, cfg.VAL_SIZE_WITHIN_TRAINVAL, seed + 3003, allow_empty=True
+    )
+    model = fit_dy_only_model(
+        x_data, train_d, val_d,
+        x_mc, train_non, val_non, train_dy, val_dy,
+        raw_before,
+        seed + 3000,
+        label="DCTR DY-only final model for untouched outer test",
+    )
+    cap_value = cap_from_validation(model, x_mc, val_dy, cap_quantile, eps)
+    factor_test_dy = predict_dctr(model, x_mc, dy_test, cap_value, eps)
+    return model, dy_test, factor_test_dy, cap_value
 
 
 def train_closure_stage(
@@ -343,11 +531,7 @@ def train_closure_stage(
     bce = weighted_bce(y_test, p_test, w_test)
 
     model.save(output_dir / f"closure_model_{stage}.keras")
-    np.savez(
-        output_dir / f"closure_{stage}_test.npz",
-        p_test=p_test,
-        w_test=w_test,
-    )
+    np.savez(output_dir / f"closure_{stage}_test.npz", p_test=p_test, w_test=w_test)
     metrics = {
         "channel": channel,
         "stage": stage,
@@ -370,20 +554,47 @@ def make_outer_test_fold(data_df, test_d, mc_df, test_m, dctr_factor_test):
     cols = cfg.LOAD_FEATURES
     d = data_df.iloc[test_d][cols].copy()
     d.insert(0, "y", np.ones(len(d), dtype=np.uint8))
+    d["is_dy"] = False
     d["weight_uncorrected"] = np.float32(1.0)
     d["weight"] = np.float32(1.0)
     d["dctr_factor"] = np.float32(1.0)
     d["weight_dctr"] = np.float32(1.0)
 
-    m = mc_df.iloc[test_m][cols + ["weight_uncorrected", "weight"]].copy()
+    m = mc_df.iloc[test_m][cols + ["weight_uncorrected", "weight", "is_dy"]].copy()
     m.insert(0, "y", np.zeros(len(m), dtype=np.uint8))
     m["dctr_factor"] = dctr_factor_test.astype(np.float32, copy=False)
     m["weight_dctr"] = (
         m["weight_uncorrected"].to_numpy(dtype=np.float32, copy=False)
         * dctr_factor_test.astype(np.float32, copy=False)
     )
-    out = pd.concat([d, m], ignore_index=True)
-    return out
+    return pd.concat([d, m], ignore_index=True)
+
+
+def print_dy_only_composition(channel: str, data_df: pd.DataFrame, mc_df: pd.DataFrame):
+    w = mc_df["weight_uncorrected"].to_numpy(dtype=np.float64, copy=False)
+    is_dy = mc_df["is_dy"].to_numpy(dtype=bool, copy=False)
+    dy_sum = float(w[is_dy].sum())
+    non_sum = float(w[~is_dy].sum())
+    target = float(len(data_df) - non_sum)
+    total_mc = float(w.sum())
+    dy_purity = dy_sum / total_mc if total_mc > 0 else np.nan
+    print("\nDCTR DY-only target composition")
+    print(f"  Data:        rows={len(data_df):_}, target weight={float(len(data_df)):.6g}")
+    print(f"  DY MC:       rows={int(is_dy.sum()):_}, sumw={dy_sum:.6g}, sum|w|={float(np.abs(w[is_dy]).sum()):.6g}")
+    print(f"  non-DY MC:   rows={int((~is_dy).sum()):_}, subtraction sumw={non_sum:.6g}, sum|w|={float(np.abs(w[~is_dy]).sum()):.6g}")
+    print(f"  Data-nonDY:  effective signed target yield={target:.6g}")
+    print(f"  DY fraction of positive-weight MC yield={dy_purity:.3%}")
+    if target <= 0:
+        print("  WARNING: integrated Data-nonDY target is non-positive; inspect the subtraction before interpreting DCTR.")
+    return {
+        "data_rows": int(len(data_df)),
+        "dy_rows": int(is_dy.sum()),
+        "non_dy_rows": int((~is_dy).sum()),
+        "dy_sumw": dy_sum,
+        "non_dy_sumw": non_sum,
+        "data_minus_non_dy_sumw": target,
+        "dy_positive_mc_yield_fraction": float(dy_purity),
+    }
 
 
 def parse_args():
@@ -391,8 +602,10 @@ def parse_args():
     ap.add_argument("--channels", nargs="+", default=cfg.CHANNELS)
     ap.add_argument("--folds", type=int, default=5,
                     help="number of DCTR cross-fitting folds over the outer train+validation sample")
+    ap.add_argument("--dctr-target", choices=DCTR_TARGETS, default="inclusive",
+                    help="inclusive: Data vs all MC; dy_only: (Data - non-DY MC) vs DY")
     ap.add_argument("--cap-quantile", type=float, default=0.995,
-                    help="cap DCTR factors at this quantile measured on each DCTR model's internal validation MC; use 0 to disable")
+                    help="cap factors at this validation-DY/MC quantile; use 0 to disable")
     ap.add_argument("--eps", type=float, default=1e-6)
     ap.add_argument("--output", type=Path, default=DEFAULT_OUT)
     ap.add_argument("--save-fold-models", action="store_true",
@@ -405,11 +618,19 @@ def main():
     if args.folds < 2:
         raise ValueError("--folds must be >= 2")
     cap_quantile = None if args.cap_quantile <= 0 else args.cap_quantile
-    args.output.mkdir(parents=True, exist_ok=True)
+    out_root = target_root(args.output, args.dctr_target)
+    out_root.mkdir(parents=True, exist_ok=True)
     print("TensorFlow GPUs:", tf.config.list_physical_devices("GPU"))
+    print("DCTR target:", args.dctr_target)
 
     metadata = {
         "purpose": "nested/cross-fitted DCTR closure C2ST",
+        "dctr_target": args.dctr_target,
+        "dctr_target_definition": (
+            "Data vs all positive-weight pre-DY MC"
+            if args.dctr_target == "inclusive"
+            else "(Data - non-DY positive-weight MC) vs DY positive-weight MC"
+        ),
         "features": cfg.FEATURES,
         "validation_vars": cfg.VALIDATION_VARS,
         "load_features": cfg.LOAD_FEATURES,
@@ -423,18 +644,29 @@ def main():
         "stages": {
             "before": "weight_uncorrected",
             "dy": "weight (official DY correction included)",
-            "dctr": "weight_uncorrected * out-of-fold DCTR factor",
+            "dctr": (
+                "weight_uncorrected * out-of-fold DCTR factor for all MC"
+                if args.dctr_target == "inclusive"
+                else "weight_uncorrected * out-of-fold DCTR factor for DY; non-DY factor = 1"
+            ),
         },
-        "negative_mc_policy": "excluded from classifier training/closure C2ST because BCE requires non-negative sample weights",
+        "negative_mc_policy": (
+            "generator-level weight_uncorrected <= 0 events are excluded from classifier training/closure; "
+            "in dy_only mode positive-weight non-DY events enter the DCTR target with a negative subtraction sign"
+        ),
+        "dy_only_signed_loss": (
+            "Keras BCE with signed sample weights normalized by one common sum|w| factor"
+            if args.dctr_target == "dy_only" else None
+        ),
     }
-    (args.output / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True))
+    (out_root / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True))
 
     layout = dyvr_lib.discover_store_layout(cfg.STORE_ROOT, cfg.REDUCTION_DIR)
     all_summary = []
 
     for channel_i, channel in enumerate(args.channels):
         print(f"\n{'='*90}\nCHANNEL {channel}\n{'='*90}")
-        channel_out = args.output / channel
+        channel_out = out_root / channel
         channel_out.mkdir(parents=True, exist_ok=True)
 
         tables = dyvr_lib.load_all(
@@ -470,8 +702,13 @@ def main():
             f"[{channel}] Data={len(data_df):_}, positive-weight MC={len(mc_df):_}, "
             f"negative-event fraction={neg_event_frac:.3%}, negative |sumw| fraction={neg_absw_frac:.3%}"
         )
+        target_composition = None
+        if args.dctr_target == "dy_only":
+            target_composition = print_dy_only_composition(channel, data_df, mc_df)
+            if not mc_df["is_dy"].any():
+                raise RuntimeError(f"[{channel}] no DY MC available for --dctr-target dy_only")
 
-        # OUTER split: the final test rows are protected from every DCTR training step.
+        # OUTER split is identical for both target definitions.
         train_d, val_d, test_d = split_class_indices(
             len(data_df), cfg.TEST_SIZE, cfg.VAL_SIZE_WITHIN_TRAINVAL, cfg.RANDOM_STATE
         )
@@ -481,7 +718,6 @@ def main():
         trainval_d = np.concatenate([train_d, val_d])
         trainval_m = np.concatenate([train_m, val_m])
 
-        # Fit preprocessing on OUTER TRAIN only. Outer validation and test do not influence it.
         scaler_fit = pd.concat([
             data_df.iloc[train_d][cfg.FEATURES],
             mc_df.iloc[train_m][cfg.FEATURES],
@@ -490,56 +726,60 @@ def main():
         del scaler_fit
         joblib.dump(scaler, channel_out / "scaler.joblib", compress=3)
 
-        # Convert once to compact float32 arrays. This avoids repeatedly carrying pandas copies
-        # through k-fold NN fitting and keeps peak RAM bounded.
         print(f"[{channel}] transforming Data/MC feature matrices once ...")
         x_data = apply_scaler(data_df, cfg.FEATURES, scaler)
         x_mc = apply_scaler(mc_df, cfg.FEATURES, scaler)
         raw_before = mc_df["weight_uncorrected"].to_numpy(dtype=np.float32, copy=True)
         raw_dy = mc_df["weight"].to_numpy(dtype=np.float32, copy=True)
+        is_dy = mc_df["is_dy"].to_numpy(dtype=bool, copy=True)
 
-        # Cross-fitted correction on closure train+validation rows.
         fold_models_dir = channel_out / "fold_models" if args.save_fold_models else None
-        dctr_factor, fold_id, fold_caps = crossfit_dctr_trainval(
-            x_data,
-            trainval_d,
-            x_mc,
-            trainval_m,
-            raw_before,
-            n_folds=args.folds,
-            cap_quantile=cap_quantile,
-            eps=args.eps,
-            seed=cfg.RANDOM_STATE + 100 * channel_i,
-            save_fold_models_dir=fold_models_dir,
-        )
+        seed_base = cfg.RANDOM_STATE + 100 * channel_i
+        if args.dctr_target == "inclusive":
+            dctr_factor, fold_id, fold_caps = crossfit_dctr_trainval_inclusive(
+                x_data, trainval_d, x_mc, trainval_m, raw_before,
+                n_folds=args.folds, cap_quantile=cap_quantile, eps=args.eps,
+                seed=seed_base, save_fold_models_dir=fold_models_dir,
+            )
+            final_dctr_model, factor_test, final_cap = fit_final_dctr_for_outer_test_inclusive(
+                x_data, trainval_d, x_mc, trainval_m, test_m, raw_before,
+                cap_quantile, args.eps, cfg.RANDOM_STATE + 5000 + 100 * channel_i,
+            )
+            dctr_factor[test_m] = factor_test
+            fold_id[test_m] = args.folds
+            del factor_test
+        else:
+            dctr_factor, fold_id, fold_caps = crossfit_dctr_trainval_dy_only(
+                x_data, trainval_d, x_mc, trainval_m, is_dy, raw_before,
+                n_folds=args.folds, cap_quantile=cap_quantile, eps=args.eps,
+                seed=seed_base, save_fold_models_dir=fold_models_dir,
+            )
+            final_dctr_model, dy_test, factor_test_dy, final_cap = fit_final_dctr_for_outer_test_dy_only(
+                x_data, trainval_d, x_mc, trainval_m, test_m, is_dy, raw_before,
+                cap_quantile, args.eps, cfg.RANDOM_STATE + 5000 + 100 * channel_i,
+            )
+            dctr_factor[dy_test] = factor_test_dy
+            fold_id[dy_test] = args.folds
+            # non-DY factors stay exactly one and their fold id stays -1 (not corrected).
+            del dy_test, factor_test_dy
 
-        # Final deployable DCTR model: uses no outer test events whatsoever.
-        final_dctr_model, factor_test, final_cap = fit_final_dctr_for_outer_test(
-            x_data,
-            trainval_d,
-            x_mc,
-            trainval_m,
-            test_m,
-            raw_before,
-            cap_quantile,
-            args.eps,
-            cfg.RANDOM_STATE + 5000 + 100 * channel_i,
-        )
-        dctr_factor[test_m] = factor_test
-        fold_id[test_m] = args.folds  # sentinel: predicted by final trainval model
         final_dctr_model.save(channel_out / "dctr_model_final.keras")
-        del final_dctr_model, factor_test
+        del final_dctr_model
         tf.keras.backend.clear_session()
         gc.collect()
 
-        if np.any(~np.isfinite(dctr_factor[np.concatenate([trainval_m, test_m])])):
+        closure_mc = np.concatenate([trainval_m, test_m])
+        if np.any(~np.isfinite(dctr_factor[closure_mc])):
             raise RuntimeError(f"[{channel}] non-finite DCTR factor remains on closure population")
+        if args.dctr_target == "dy_only" and not np.all(dctr_factor[~is_dy] == 1.0):
+            raise RuntimeError(f"[{channel}] a non-DY event received a DY-only DCTR factor different from 1")
 
-        # Save reusable per-MC correction factors and provenance.
         np.savez(
             channel_out / "dctr_factors_mc.npz",
             dctr_factor=dctr_factor,
             fold_id=fold_id,
+            is_dy=is_dy,
+            dctr_target=np.asarray(args.dctr_target),
             mc_train=train_m,
             mc_val=val_m,
             mc_test=test_m,
@@ -547,12 +787,10 @@ def main():
             final_test_cap=np.asarray(np.nan if final_cap is None else final_cap, dtype=np.float64),
         )
 
-        # Save only OUTER test raw variables/physical weights for independent plotting later.
         outer_test = make_outer_test_fold(data_df, test_d, mc_df, test_m, dctr_factor[test_m])
         outer_test.to_parquet(channel_out / "outer_test_fold.parquet", index=False, compression="zstd")
         del outer_test
 
-        # Build the three closure NN matrices once; stages differ only by MC sample weights.
         x_train, y_train = make_pair(x_data, train_d, x_mc, train_m)
         x_val, y_val = make_pair(x_data, val_d, x_mc, val_m)
         x_test, y_test = make_pair(x_data, test_d, x_mc, test_m)
@@ -565,30 +803,20 @@ def main():
         metrics_by_stage = {}
         for stage_i, (stage, raw_stage) in enumerate(physical_stage_weights.items()):
             metrics = train_closure_stage(
-                channel,
-                stage,
-                x_train,
-                y_train,
-                x_val,
-                y_val,
-                x_test,
-                y_test,
-                raw_stage,
-                raw_stage[train_m],
-                raw_stage[val_m],
-                raw_stage[test_m],
-                len(data_df),
-                len(train_d),
-                len(val_d),
-                len(test_d),
+                channel, stage,
+                x_train, y_train, x_val, y_val, x_test, y_test,
+                raw_stage, raw_stage[train_m], raw_stage[val_m], raw_stage[test_m],
+                len(data_df), len(train_d), len(val_d), len(test_d),
                 channel_out,
                 seed=cfg.RANDOM_STATE + 7000 + 100 * channel_i + stage_i,
             )
+            metrics["dctr_target"] = args.dctr_target
             metrics_by_stage[stage] = metrics
             all_summary.append(metrics)
 
         comparison = {
             "channel": channel,
+            "dctr_target": args.dctr_target,
             "auc_before": metrics_by_stage["before"]["auc"],
             "auc_dy": metrics_by_stage["dy"]["auc"],
             "auc_dctr": metrics_by_stage["dctr"]["auc"],
@@ -598,19 +826,19 @@ def main():
             "negative_event_fraction_excluded": neg_event_frac,
             "negative_absw_fraction_excluded": neg_absw_frac,
             "final_dctr_cap": final_cap,
+            "target_composition": target_composition,
         }
         (channel_out / "comparison.json").write_text(json.dumps(comparison, indent=2))
         print(json.dumps(comparison, indent=2))
 
-        # Free channel-scale objects before starting the next channel.
         del x_train, y_train, x_val, y_val, x_test, y_test
-        del x_data, x_mc, raw_before, raw_dy, dctr_factor, fold_id
+        del x_data, x_mc, raw_before, raw_dy, dctr_factor, fold_id, is_dy
         del train_d, val_d, test_d, train_m, val_m, test_m, trainval_d, trainval_m
         del scaler, data_df, mc_df, physical_stage_weights
         gc.collect()
 
-    pd.DataFrame(all_summary).to_csv(args.output / "closure_metrics.csv", index=False)
-    print(f"\nAll closure artifacts written under {args.output.resolve()}")
+    pd.DataFrame(all_summary).to_csv(out_root / "closure_metrics.csv", index=False)
+    print(f"\nAll closure artifacts written under {out_root.resolve()}")
 
 
 if __name__ == "__main__":

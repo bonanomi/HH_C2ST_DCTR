@@ -1,272 +1,231 @@
 # Final DCTR closure test: cross-fitting + an independent C2ST
 
-This is the final, stricter validation stage built on top of the existing C2ST/DCTR pipeline.
-It answers one focused question:
+This directory contains the strictest DCTR validation in the repository.  It derives an out-of-sample DCTR correction, freezes it, trains a **new** classifier, and measures Data/MC closure on a protected outer test sample.
 
-> After deriving a multidimensional DCTR correction from Data vs nominal (pre-DY-correction) MC,
-> does a **new classifier**, evaluated on events that were never used to derive the correction,
-> find the DCTR-weighted MC harder to distinguish from Data than (a) uncorrected MC or (b) MC with
-> the official DY correction?
+The ideal closure C2ST result is **AUC = 0.5**.  Smaller `|AUC - 0.5|` means less classifier-visible Data/MC separation.
 
-The ideal C2ST result is **AUC = 0.5**. Smaller `|AUC - 0.5|` means better closure.
+A detailed explanation of the nested split and weight provenance is available in [`TRAIN_DCTR_CROSSFIT_CLOSURE_WALKTHROUGH.md`](TRAIN_DCTR_CROSSFIT_CLOSURE_WALKTHROUGH.md).
 
-## DCTR cross-fit closure documentation
+## DCTR target definitions
 
-A detailed walkthrough of the final DCTR closure procedure is available in
-[`TRAIN_DCTR_CROSSFIT_CLOSURE_WALKTHROUGH.md`](TRAIN_DCTR_CROSSFIT_CLOSURE_WALKTHROUGH.md).
+The training script supports two target definitions.
 
-### Quick index
+### `inclusive` — historical/default mode
 
-- [Purpose and overall workflow](TRAIN_DCTR_CROSSFIT_CLOSURE_WALKTHROUGH.md#1-purpose-of-this-script)
-- [What does `OUTER` mean?](TRAIN_DCTR_CROSSFIT_CLOSURE_WALKTHROUGH.md#3-terminology-what-does-outer-mean)
-- [Which Data, MC, and event weights are used?](TRAIN_DCTR_CROSSFIT_CLOSURE_WALKTHROUGH.md#4-which-data-and-mc-enter-the-script)
-- [How the OUTER train/validation/test split works](TRAIN_DCTR_CROSSFIT_CLOSURE_WALKTHROUGH.md#7-step-3--make-the-outer-trainvalidationtest-split)
-- [How the NN sample weights are class-balanced](TRAIN_DCTR_CROSSFIT_CLOSURE_WALKTHROUGH.md#11-the-class-balancing-weights-used-by-the-neural-networks)
-- [DCTR training vs closure training](TRAIN_DCTR_CROSSFIT_CLOSURE_WALKTHROUGH.md#12-the-two-different-training-stages)
-- [How K-fold DCTR cross-fitting works](TRAIN_DCTR_CROSSFIT_CLOSURE_WALKTHROUGH.md#13-step-4--cross-fit-dctr-factors-on-outer-trainvalidation)
-- [How the DCTR factor and cap are obtained](TRAIN_DCTR_CROSSFIT_CLOSURE_WALKTHROUGH.md#18-how-is-the-dctr-factor-obtained)
-- [How the final DCTR model is applied to the untouched outer test](TRAIN_DCTR_CROSSFIT_CLOSURE_WALKTHROUGH.md#22-step-5--train-the-final-dctr-model-for-outer-test)
-- [Training the three final closure classifiers: before, DY, DCTR](TRAIN_DCTR_CROSSFIT_CLOSURE_WALKTHROUGH.md#28-step-6--train-three-new-closure-classifiers)
-- [How the final AUC comparison is evaluated](TRAIN_DCTR_CROSSFIT_CLOSURE_WALKTHROUGH.md#35-step-7--evaluate-all-three-on-exactly-the-same-outer-test)
-- [“Who sees what?” summary](TRAIN_DCTR_CROSSFIT_CLOSURE_WALKTHROUGH.md#38-who-sees-what-summary)
-- [Weight flow diagram](TRAIN_DCTR_CROSSFIT_CLOSURE_WALKTHROUGH.md#39-weight-flow-diagram)
-- [What files are produced](TRAIN_DCTR_CROSSFIT_CLOSURE_WALKTHROUGH.md#40-what-files-are-produced)
-- [How to interpret the final AUCs](TRAIN_DCTR_CROSSFIT_CLOSURE_WALKTHROUGH.md#41-how-to-interpret-the-final-aucs)
-- [Why both cross-fitting and an outer test are needed](TRAIN_DCTR_CROSSFIT_CLOSURE_WALKTHROUGH.md#44-why-do-we-need-both-cross-fitting-and-an-outer-test)
-- [Compact end-to-end walkthrough](TRAIN_DCTR_CROSSFIT_CLOSURE_WALKTHROUGH.md#45-compact-step-by-step-walkthrough-matching-the-script-header)
+The DCTR network distinguishes
 
-## Why this script is separate
+```text
+class 1: Data
+class 0: all pre-DY MC
+```
 
-Do not reuse the original DCTR network as the closure classifier. A network used to construct a
-reweighting is not an independent judge of that same reweighting. The final study therefore trains
-fresh closure networks and evaluates them on a protected outer test sample.
+using the existing class-balanced positive-weight BCE.  Its odds estimate
 
-## Files
+$$
+r_{\rm inclusive}(x) \simeq \frac{p_{\rm Data}(x)}{p_{\rm all\,MC}(x)}
+$$
 
-- `train_dctr_crossfit_closure.py` — derives out-of-fold DCTR factors, trains the three independent
-  closure C2STs (`before`, `dy`, `dctr`), and saves all outer-test artifacts.
-- `validate_dctr_crossfit_closure.py` — plots AUCs, ROCs, classifier scores, feature closure and
-  DCTR factors; also computes paired bootstrap intervals for AUC differences.
-- `c2st_config.py`, `c2st_core.py`, `dyvr_lib.py`, `validation_utils.py` — existing utilities used by
-  the study.
+and the factor is applied to every MC event:
+
+$$
+w_{\rm DCTR}=w_{\rm uncorrected}\,r_{\rm inclusive}(x).
+$$
+
+This is the behavior of the original cross-fit closure code and remains the default for backwards compatibility.
+
+### `dy_only` — process-specific DY mode
+
+The DCTR network instead distinguishes
+
+```text
+class 1: Data - non-DY MC
+class 0: DY MC
+```
+
+The target class is implemented with signed weights:
+
+```text
+Data       : label 1, +1
+non-DY MC  : label 1, -weight_uncorrected
+DY MC      : label 0, +weight_uncorrected
+```
+
+Generator-level MC events with `weight_uncorrected <= 0` are still excluded from NN training, as in the historical pipeline.  The negative sign above is introduced deliberately to perform the **background subtraction**.
+
+The signed sample weights are multiplied by one common normalization factor so that their mean absolute value is one.  This keeps the BCE numerical scale stable without altering the event-to-event ratios or signs.
+
+The resulting odds estimate the process-specific correction
+
+$$
+r_{\rm DY}(x) \simeq
+\frac{p_{\rm Data}(x)-p_{\rm nonDY}(x)}{p_{\rm DY}(x)}.
+$$
+
+Only DY events receive the learned factor:
+
+$$
+w_i^{\rm DCTR,DY-only}=
+\begin{cases}
+w_i^{\rm uncorrected} r_{\rm DY}(x_i), & i\in {\rm DY},\\
+w_i^{\rm uncorrected}, & i\notin {\rm DY}.
+\end{cases}
+$$
+
+For convenience the stored `dctr_factor` is exactly `1` for non-DY MC, so `weight_dctr = weight_uncorrected * dctr_factor` remains valid for every MC row.
+
+This construction is the DY analogue of CMS DCTR applications in which a target process is trained against Data after subtraction of the other simulated backgrounds.
 
 ## Statistical layout
 
-For each channel, Data and positive-weight MC are first divided into an **outer** train, validation
-and test population using the existing split fractions from `c2st_config.py`.
+Both target modes use the same leakage protection:
 
-The outer test set has a special status:
+1. Data and positive-weight MC are split into **outer train / validation / test** populations.
+2. The scaler is fitted on outer train only.
+3. DCTR is cross-fitted on outer train+validation.
+4. Each corrected training/validation event receives a factor from a network that did not train on that event.
+5. A final DCTR model trained only on outer train+validation supplies factors for the untouched outer test.
+6. Three fresh closure classifiers are trained from scratch using the same outer split:
+   - `before`: `weight_uncorrected`
+   - `dy`: `weight` (official DY correction)
+   - `dctr`: the DCTR prescription selected by `--dctr-target`
+7. All closure AUCs are evaluated on exactly the same outer-test rows.
 
-- it is never used to train a DCTR model;
-- it is never used to determine the DCTR cap;
-- it is used only for the final closure C2ST evaluation and downstream plots.
+For `dy_only`, Data, DY, and non-DY MC are folded independently inside outer train+validation.  Only held-out DY rows receive a factor; the corresponding held-out Data and non-DY folds are excluded from the fold model as well.
 
-### DCTR factors for outer train + validation
-
-The outer train+validation population is divided into `K` folds. For each fold:
-
-1. hold that fold out;
-2. train a Data-vs-MC DCTR classifier on the other `K-1` folds;
-3. use an internal validation subset of those `K-1` folds for early stopping;
-4. determine the optional DCTR cap from that internal-validation MC;
-5. predict `p(Data|x)` for the held-out MC fold;
-6. store `p/(1-p)` (after optional capping) as that fold's DCTR factor.
-
-Thus each outer-train/validation MC event receives a correction from a network that did not train on
-that event.
-
-### DCTR factors for the outer test
-
-A final DCTR model is trained only from the outer train+validation population. It predicts DCTR
-factors for the outer test MC. Therefore **no outer-test event participates in DCTR fitting**.
-
-The final DCTR model and scaler are saved and are the natural objects to use later on genuinely new
-MC events.
-
-## The three closure classifiers
-
-Three fresh neural networks are then trained with identical input features, architecture, outer split
-and class-balancing convention. Only the physical MC weight prescription changes:
-
-- `before`: `weight_uncorrected`
-- `dy`: `weight` (the official DY correction is included)
-- `dctr`: `weight_uncorrected * dctr_factor`
-
-Each stage receives its own single global class-balancing factor, exactly as in the original C2ST.
-This means the closure AUC tests **multidimensional shape agreement**, not the absolute MC yield.
-
-All three networks are evaluated on the exact same outer test rows.
+The closure C2ST still uses the normal positive-weight, stage-specific class balancing.  The signed subtraction is used **only while deriving the DY-only DCTR model**.
 
 ## Run the training
 
-From the `c2st_pipeline` directory:
+Run from the repository root.
+
+Historical inclusive mode:
 
 ```bash
-conda activate c2st
-/usr/bin/time -v python -m c2st_final_closure.train_dctr_crossfit_closure.py --folds 5
+python -m c2st_final_closure.train_dctr_crossfit_closure \
+    --channels 2mu \
+    --folds 5 \
+    --dctr-target inclusive
 ```
 
-To start with one channel while profiling runtime:
+DY-only mode:
 
 ```bash
-python -m c2st_final_closure.train_dctr_crossfit_closure.py --channels 2mu --folds 5
+python -m c2st_final_closure.train_dctr_crossfit_closure \
+    --channels 2mu \
+    --folds 5 \
+    --dctr-target dy_only
 ```
 
-The default DCTR factor cap is the 99.5% quantile (`--cap-quantile 0.995`) determined independently
-for each fold from its model's internal-validation MC. Disable capping for a diagnostic run with:
+The default cap is the 99.5% quantile derived from the appropriate internal-validation MC population.  In DY-only mode the cap is derived from **DY validation MC only**.  Disable capping for diagnostics with:
 
 ```bash
-python -m c2st_final_closure.train_dctr_crossfit_closure.py --channels 2mu --folds 5 --cap-quantile 0
+--cap-quantile 0
 ```
 
-Cross-fitting requires more training than the basic C2ST. With 5 folds the script trains, per channel:
+With five folds each run trains 5 cross-fit DCTR networks, 1 final DCTR network and 3 fresh closure classifiers per channel.
 
-- 5 DCTR cross-fit networks;
-- 1 final DCTR model for the untouched outer test / future deployment;
-- 3 closure networks (`before`, `dy`, `dctr`).
+## Artifacts
 
-That is 9 networks per channel. TensorFlow will use the NAF GPU automatically when visible.
-
-## Outputs
-
-Artifacts are written under:
+Inclusive artifacts retain the historical location:
 
 ```text
-c2st_artifacts/dctr_crossfit_closure/
+c2st_artifacts/dctr_crossfit_closure/<channel>/
 ```
 
-For each channel the main files are:
+DY-only artifacts are kept separate:
 
 ```text
-2mu/
-├── scaler.joblib
-├── dctr_model_final.keras
-├── dctr_factors_mc.npz
-├── outer_test_fold.parquet
-├── closure_model_before.keras
-├── closure_model_dy.keras
-├── closure_model_dctr.keras
-├── closure_before_test.npz
-├── closure_dy_test.npz
-├── closure_dctr_test.npz
-└── comparison.json
+c2st_artifacts/dctr_crossfit_closure/dy_only/<channel>/
 ```
 
-`outer_test_fold.parquet` contains raw test features and physical weights, including:
+Each channel contains:
 
-- `weight_uncorrected`
-- `weight`
-- `dctr_factor`
-- `weight_dctr = weight_uncorrected * dctr_factor`
-
-## Run the validation
-
-```bash
-python -m c2st_final_closure.validate_dctr_crossfit_closure.py
+```text
+scaler.joblib
+dctr_model_final.keras
+dctr_factors_mc.npz
+outer_test_fold.parquet
+closure_model_before.keras
+closure_model_dy.keras
+closure_model_dctr.keras
+closure_before_test.npz
+closure_dy_test.npz
+closure_dctr_test.npz
+comparison.json
 ```
 
-Useful examples:
+`dctr_factors_mc.npz` also stores `is_dy` and the target mode.  `outer_test_fold.parquet` contains `is_dy`, `dctr_factor`, and `weight_dctr` so the correction can be inspected independently.
+
+The DY-only training additionally prints and stores diagnostics for the target composition, including the DY yield, non-DY subtraction, `Data - nonDY` integrated target and DY fraction of the positive-weight MC yield.
+
+## Run validation
+
+Validate one mode:
 
 ```bash
-# ll_pt from 0 to 200 GeV, 60 equal-width bins
-python -m c2st_final_closure.validate_dctr_crossfit_closure.py \
+python -m c2st_final_closure.validate_dctr_crossfit_closure \
+    --dctr-target dy_only \
+    --channels 2mu \
+    --vars mli_ll_pt mli_n_jet \
+    --bins 60
+```
+
+For example, with an explicit range:
+
+```bash
+python -m c2st_final_closure.validate_dctr_crossfit_closure \
+    --dctr-target dy_only \
+    --channels 2mu \
     --vars mli_ll_pt \
     --range 0 200 \
-    --bins 60
+    --bins 60 \
+    --normalization shape
 ```
+
+After **both** target modes have been trained with the same configuration, compare them directly:
 
 ```bash
-# multiple variables, using each variable's full finite range
-python -m c2st_final_closure.validate_dctr_crossfit_closure.py \
-    --vars mli_ll_pt mli_n_jet mli_mbb mli_met_pt \
+python -m c2st_final_closure.validate_dctr_crossfit_closure \
+    --dctr-target both \
+    --channels 2mu \
+    --vars mli_ll_pt mli_n_jet \
     --bins 60
 ```
 
-By default feature plots are shape-normalized independently to Data in the displayed bins. This makes
-it easy to compare which of `before`, `DY`, or `DCTR` best reproduces the differential shape. Use
-`--normalization physical` when you explicitly want the raw physical-yield comparison instead.
-
-The validation script creates:
-
-- `closure_auc_comparison.png` — direct before/DY/DCTR AUC comparison;
-- one ROC plot per channel;
-- one closure-classifier score plot per channel;
-- DCTR factor distributions on the untouched outer test;
-- Data/MC feature closure plots for requested variables;
-- `paired_auc_bootstrap.csv` — paired bootstrap confidence intervals for:
-  - DY − before,
-  - DCTR − before,
-  - DCTR − DY.
-
-A negative `delta_auc` is an improvement if all AUCs are above 0.5.
-
-## Interpreting the result
-
-An example outcome could be:
+The combined validation compares:
 
 ```text
-before  AUC = 0.600
-DY      AUC = 0.570
-DCTR    AUC = 0.525
+before
+official DY
+inclusive DCTR
+DY-only DCTR
 ```
 
-This would mean both corrections improve closure, with the DCTR correction leaving less
-classifier-visible discrepancy on the protected outer test.
+and produces:
 
-Another possible result is:
+- a four-way closure-AUC comparison;
+- ROC curves and fresh closure-classifier score distributions;
+- feature-by-feature Data/MC closure plots;
+- all pairwise paired-bootstrap AUC differences;
+- a scatter comparison of inclusive and DY-only DCTR factors on the same DY outer-test events;
+- a compact CSV summary of the factor comparison.
+
+Feature plots are shape-normalized by default.  Use `--normalization physical` to inspect absolute yields.
+
+## Interpreting the comparison
+
+The main question is whether a process-specific correction
 
 ```text
-before  AUC = 0.600
-DY      AUC = 0.555
-DCTR    AUC = 0.590
+(Data - nonDY) / DY
 ```
 
-Then the nominal DY correction would generalize better than DCTR. A DCTR plot that looked excellent
-on the sample used to construct it would not be sufficient evidence of a successful correction; this
-independent closure C2ST is designed precisely to reveal that failure mode.
+closes the full Data/MC prediction as well as the inclusive
 
-The most convincing result is not only an AUC near 0.5. Also inspect held-out or physics-relevant
-variables in `outer_test_fold.parquet`. A reweighter that closes only its own training variables but
-creates distortions elsewhere is not satisfactory.
-
-## Negative MC weights
-
-The current C2ST/DCTR classifier training retains only MC rows with `weight_uncorrected > 0`.
-Ordinary binary cross entropy expects non-negative sample weights; feeding signed NLO weights into BCE
-is not a well-defined probability-density classification problem.
-
-This does **not** mean negative-weight events should be removed from the real physics prediction.
-For deployment, the final DCTR model depends only on event features:
-
-```python
-p_data = model.predict(X)
-dctr_factor = p_data / (1.0 - p_data)
-new_signed_weight = original_signed_weight * dctr_factor
+```text
+Data / all-MC
 ```
 
-Because the DCTR factor is positive, a negative original event weight stays negative.
+correction while being more directly interpretable as a genuine DY correction.
 
-The training script reports both:
-
-- fraction of MC events excluded because their weight is non-positive;
-- fraction of total absolute MC weight carried by those events.
-
-If those fractions are sizeable or negative-weight events populate different phase-space regions,
-this approximation deserves a dedicated systematic study. A future extension could evaluate the
-final DCTR model on the full signed MC sample and make physical closure plots with all signed events.
-
-## Deployment on new MC
-
-Use `scaler.joblib` and `dctr_model_final.keras`. The new event's existing weight is not supplied to
-the network. Only the configured feature values are transformed and evaluated:
-
-```python
-X = scaler.transform(new_mc[cfg.FEATURES])
-p_data = model.predict(X).reshape(-1)
-factor = p_data / (1.0 - p_data)
-new_weight = original_weight_uncorrected * factor
-```
-
-Apply the same configured phase-space selections and the same feature ordering used in training.
-If the production analysis uses a fixed DCTR cap, save and reuse the cap from the training artifact
-rather than re-estimating it on the new sample.
+If the inclusive and DY-only factors agree on DY events and give similar closure, the original inclusive DCTR was likely dominated by the DY mismatch.  If they differ substantially, the inclusive reweighter was also compensating discrepancies in the non-DY mixture.

@@ -65,6 +65,7 @@ For a more detailed description of the problem, the individual steps of the work
 - [39. Ideal next steps](C2ST_DOC.md#41-ideal-next-steps)
 - [40. A concise mental model of the complete pipeline](C2ST_DOC.md#41-a-concise-mental-model-of-the-complete-pipeline)
 - [41. Final interpretation](C2ST_DOC.md#42-final-interpretation)
+- [42. DY-only process-specific DCTR extension](C2ST_DOC.md#42-dy-only-process-specific-dctr-extension)
 
 ## Train/export
 
@@ -126,4 +127,9 @@ Training uses the physical relative MC event weights but multiplies the entire M
 ## A final closure test
 
 The code in [`c2st_final_closure`](c2st_final_closure) implements the final closure test. Consider running it only after having run the toy study and the scripts in this folder. After everything is well understood, move to this final test.
-Start by reading the relevant [`README`](c2st_final_closure/README_DCTR_CLOSURE.md).
+Start by reading the relevant [`README`](c2st_final_closure/README.md).
+
+### Inclusive and DY-only DCTR targets
+
+The final cross-fit closure framework supports two DCTR definitions.  The historical `inclusive` mode learns Data versus the full pre-DY MC mixture and reweights all MC.  The new `dy_only` mode learns DY versus `Data - non-DY MC` and applies the learned factor only to DY.  Both use the same outer split, k-fold leakage protection, DCTR capping and fresh closure C2ST.  See [`c2st_final_closure/README.md`](c2st_final_closure/README.md) for commands and interpretation.
+

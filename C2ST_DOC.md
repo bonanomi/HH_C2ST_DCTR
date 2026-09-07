@@ -1757,3 +1757,179 @@ Instead, aim for a conclusion of the form:
 
 That combination of **global sensitivity, localization, uncertainty, and physics impact** is the scientifically useful outcome of the pipeline.
 
+
+
+---
+
+# 42. DY-only process-specific DCTR extension
+
+The final cross-fitted closure study supports two definitions of the distribution learned by DCTR.
+
+## 42.1 Inclusive DCTR
+
+The original/default mode is selected with
+
+```bash
+--dctr-target inclusive
+```
+
+and keeps the historical construction unchanged:
+
+```text
+class 1 = Data
+class 0 = all positive-weight pre-DY MC
+```
+
+The DCTR classifier uses the existing class-balanced positive-weight BCE. Its score is converted to
+
+$$
+r_{\rm inclusive}(x)=\frac{p(\mathrm{Data}\mid x)}{1-p(\mathrm{Data}\mid x)}
+$$
+
+and the factor is applied to every MC event.
+
+Inclusive artifacts remain under
+
+```text
+c2st_artifacts/dctr_crossfit_closure/<channel>/
+```
+
+for backwards compatibility.
+
+## 42.2 DY-only DCTR
+
+The process-specific mode is selected with
+
+```bash
+--dctr-target dy_only
+```
+
+and learns
+
+```text
+class 1 = Data - non-DY MC
+class 0 = DY MC
+```
+
+The target class is implemented with signed sample weights:
+
+```text
+Data      : +1
+non-DY MC : -weight_uncorrected
+DY MC     : +weight_uncorrected
+```
+
+The negative sign on non-DY MC is a deliberate background-subtraction term. It should not be confused with generator-level negative MC weights: as in the rest of the C2ST pipeline, events with `weight_uncorrected <= 0` are removed from NN training before this construction.
+
+The signed weights are multiplied by one common factor so that their mean absolute value is one. This changes only the global numerical scale of the BCE; it preserves the signs and all relative physical weights. The classifier therefore learns the process-specific odds
+
+$$
+r_{\rm DY}(x)\simeq
+\frac{p_{\rm Data}(x)-p_{\rm nonDY}(x)}{p_{\rm DY}(x)}.
+$$
+
+Only DY MC receives this factor:
+
+$$
+w_i^{\rm DCTR,DY-only}=
+\begin{cases}
+w_i^{\rm uncorrected} r_{\rm DY}(x_i), & i\in \mathrm{DY},\\
+w_i^{\rm uncorrected}, & i\notin \mathrm{DY}.
+\end{cases}
+$$
+
+In the saved arrays the DCTR factor is set to exactly one for non-DY MC, so the generic relation
+
+```text
+weight_dctr = weight_uncorrected * dctr_factor
+```
+
+still holds for all MC rows.
+
+The DY/non-DY identity is taken from `cfg.MC_PROCESSES[label]["is_dy"]`; no DY process name is hard-coded.
+
+## 42.3 Cross-fitting in DY-only mode
+
+The outer train/validation/test split is unchanged. Inside outer train+validation, Data, DY MC and non-DY MC are folded independently. For fold $k$ the fold model excludes the held-out Data, DY and non-DY partitions. It receives an internal train/validation split from the remaining folds, and the cap is derived from internal-validation **DY MC** only. The model then predicts DCTR factors only for the held-out DY fold.
+
+For the protected outer test, one final DY-only model is fitted from outer train+validation only and is applied only to outer-test DY MC. Thus no corrected DY row receives a factor from a model that trained on that same row.
+
+## 42.4 Closure classifier treatment
+
+The signed subtraction is used only to **derive** the DY-only DCTR model. The fresh closure C2ST remains an ordinary positive-weight Data-vs-total-MC classifier and retains the existing stage-specific class balancing.
+
+For DY-only DCTR its physical MC prescription is
+
+```text
+DY     : weight_uncorrected * dctr_factor
+non-DY : weight_uncorrected
+```
+
+and the full corrected mixture is compared against Data.
+
+This means the final AUC still answers the same closure question as before: after choosing one physical MC weighting prescription, can a new classifier distinguish the full MC prediction from Data?
+
+## 42.5 Running and comparing the two modes
+
+Train the original inclusive correction:
+
+```bash
+python -m c2st_final_closure.train_dctr_crossfit_closure \
+    --channels 2mu \
+    --folds 5 \
+    --dctr-target inclusive
+```
+
+Train the process-specific DY correction:
+
+```bash
+python -m c2st_final_closure.train_dctr_crossfit_closure \
+    --channels 2mu \
+    --folds 5 \
+    --dctr-target dy_only
+```
+
+The latter is saved under
+
+```text
+c2st_artifacts/dctr_crossfit_closure/dy_only/<channel>/
+```
+
+Validate it independently with
+
+```bash
+python -m c2st_final_closure.validate_dctr_crossfit_closure \
+    --dctr-target dy_only \
+    --channels 2mu
+```
+
+After both modes have been produced with the same configuration, compare
+
+```text
+before
+official DY
+inclusive DCTR
+DY-only DCTR
+```
+
+on the common outer test with
+
+```bash
+python -m c2st_final_closure.validate_dctr_crossfit_closure \
+    --dctr-target both \
+    --channels 2mu
+```
+
+The combined validator checks that the two outer tests are aligned, computes all pairwise paired-bootstrap AUC differences, compares the inclusive and DY-only DCTR factors on DY events, and overlays both corrected total-MC predictions in the feature closure plots.
+
+## 42.6 What this comparison tells us
+
+The inclusive correction answers
+
+> Can the full MC mixture be reweighted to look like Data?
+
+The DY-only correction asks the more process-specific question
+
+> After subtracting the non-DY prediction from Data, what correction should be applied to DY alone?
+
+If the two DCTR factors are similar on DY events and give similar independent closure, the original inclusive DCTR was probably dominated by the DY mismatch. If the factors or closure differ substantially, the inclusive DCTR was also compensating mismodelling from the non-DY background mixture.
