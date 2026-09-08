@@ -686,59 +686,71 @@ The physically important **relative** weights remain present.
 
 # 15. Neural-network architecture
 
-The architecture is configured through
+Neural-network construction is centralized in `c2st_models.py` through the reusable `build_binary_classifier(...)` helper. Architecture and optimizer choices are therefore configuration rather than hard-coded details of individual training functions.
+
+## 15.1 Standard C2ST and closure classifiers
+
+The standard profile is configured in `c2st_config.py` with
 
 ```python
-HIDDEN = (128, 128, 128)
+HIDDEN = (50,)
+BATCH_NORMALIZATION = False
+OPTIMIZER = "adam"
+LEARNING_RATE = 1e-3
 ```
 
-which creates
+For example, `HIDDEN = (50,)` gives one 50-node ReLU hidden layer, while `HIDDEN = (128, 128, 128)` gives three 128-node hidden layers.
+
+The final sigmoid output is interpreted as
+
+$$
+p(x)=P(\mathrm{Data}\mid x).
+$$
+
+## 15.2 DCTR-specific profile
+
+DCTR derivation has a separate configurable profile:
+
+```python
+DCTR_HIDDEN = HIDDEN
+DCTR_BATCH_NORMALIZATION = True
+DCTR_OPTIMIZER = "sgd"
+DCTR_LEARNING_RATE = 5e-3
+```
+
+With the current `HIDDEN = (50,)`, this gives
 
 ```text
-Input
+scaled inputs
   |
-Dense(128, ReLU)
+BatchNormalization
   |
-Dense(128, ReLU)
-  |
-Dense(128, ReLU)
+Dense(50, ReLU)
   |
 Dense(1, sigmoid)
 ```
 
-The final output is interpreted as
+Both inclusive and DY-only DCTR derivation use this DCTR profile. Fresh closure C2ST classifiers continue to use the standard profile from Section 15.1.
 
-$$
-p(x) = P(\mathrm{Data}\mid x).
-$$
+`DCTR_HIDDEN = HIDDEN` makes the DCTR hidden-layer layout follow `HIDDEN` by default. It can be overridden independently, for example:
 
-The model uses:
-
-```text
-optimizer: Adam
-loss: binary cross entropy
-learning rate: 1e-3 (configurable)
+```python
+HIDDEN = (50,)
+DCTR_HIDDEN = (64, 32)
 ```
 
-and the callbacks:
+## 15.3 BatchNorm versus the external feature scaler
 
-- `ReduceLROnPlateau`;
-- `EarlyStopping` with best-weight restoration.
+The two operations are different.
 
-The goal is not to build the largest possible network. For a C2ST, a useful check is that the measured AUC is reasonably stable against modest architecture changes.
+The external scaler is fitted once on outer-training events and then frozen. Long-tailed kinematics use `RobustScaler`; the remaining configured inputs use `MinMaxScaler`.
 
-For example, compare:
+BatchNorm is a trainable NN layer. During training it uses batch statistics and trainable scale/offset parameters. It is therefore not required simply because features need numerical rescaling.
 
-```text
-1 x 64
-1 x 128
-3 x 128
-3 x 256 (optional stress test)
-```
+For the standard C2ST it is disabled by default. For DCTR it is enabled by default because the shallow BatchNorm + 50-node + SGD setup was found to be substantially more stable for the signed DY-only optimization than the previous deeper Adam setup.
 
-If AUC has already saturated, increasing model capacity does not add useful information.
+The optimizer itself is also configurable. At present the shared model builder supports `"adam"` and `"sgd"`.
 
----
 
 # 16. Memory-aware training in `c2st_nn.py`
 

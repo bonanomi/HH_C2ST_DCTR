@@ -287,25 +287,136 @@ def plot_feature_closure_both(channel, test, var, bins, normalization, outdir):
     return scales
 
 
-def plot_dctr_factors_single(channel, test, outdir, target, bins=100, qmax=0.999):
+def _factor_mask(test: pd.DataFrame, target: str) -> np.ndarray:
     y = test["y"].to_numpy(dtype=np.uint8, copy=False)
     mask = y == 0
-    if target == "dy_only" and "is_dy" in test:
+    if target == "dy_only":
+        if "is_dy" not in test:
+            raise KeyError("DY-only factor diagnostics require the 'is_dy' column in outer_test_fold.parquet")
         mask &= test["is_dy"].to_numpy(dtype=bool, copy=False)
-    f = test["dctr_factor"].to_numpy(dtype=np.float32, copy=False)[mask]
-    f = f[np.isfinite(f) & (f >= 0)]
-    xmax = float(np.quantile(f, qmax))
-    edges = np.linspace(0, max(xmax, np.finfo(np.float32).eps), bins + 1)
+    return mask
+
+
+def dctr_factor_summary(test: pd.DataFrame, target: str, channel_dir: Path) -> dict:
+    """Summarize the applied outer-test DCTR correction factors."""
+    mask = _factor_mask(test, target)
+    factor = test["dctr_factor"].to_numpy(dtype=np.float64, copy=False)[mask]
+    raw_before = test["weight_uncorrected"].to_numpy(dtype=np.float64, copy=False)[mask]
+
+    finite = np.isfinite(factor) & np.isfinite(raw_before) & (factor >= 0)
+    factor = factor[finite]
+    raw_before = raw_before[finite]
+    if not len(factor):
+        raise ValueError(f"{target}: no finite outer-test DCTR factors available")
+
+    artifact = np.load(channel_dir / "dctr_factors_mc.npz", mmap_mode="r")
+    cap = float(np.asarray(artifact["final_test_cap"]).reshape(()))
+    if not np.isfinite(cap):
+        cap = np.nan
+
+    q = np.quantile(factor, [0.01, 0.05, 0.50, 0.95, 0.99])
+    weight_sum = np.sum(raw_before, dtype=np.float64)
+    weighted_mean = (
+        float(np.sum(raw_before * factor, dtype=np.float64) / weight_sum)
+        if weight_sum > 0 else np.nan
+    )
+
+    frac_at_cap = (
+        float(np.mean(np.isclose(factor, cap, rtol=2e-6, atol=1e-8)))
+        if np.isfinite(cap) else np.nan
+    )
+
+    return {
+        "n_events": int(len(factor)),
+        "min": float(np.min(factor)),
+        "q01": float(q[0]),
+        "q05": float(q[1]),
+        "median": float(q[2]),
+        "q95": float(q[3]),
+        "q99": float(q[4]),
+        "max": float(np.max(factor)),
+        "mean": float(np.mean(factor)),
+        "weighted_mean": weighted_mean,
+        "cap": cap,
+        "fraction_at_cap": frac_at_cap,
+        "fraction_lt_0p1": float(np.mean(factor < 0.1)),
+        "fraction_lt_0p01": float(np.mean(factor < 0.01)),
+    }
+
+
+def plot_dctr_weights_single(
+    channel,
+    test,
+    outdir,
+    target,
+    channel_dir,
+    bins=100,
+    qmax=0.999,
+):
+    """Plot and tabulate the applied outer-test DCTR factors.
+
+    The factors stored in the outer-test parquet are the factors actually used
+    for closure, i.e. after the validation-derived cap.
+    """
+    mask = _factor_mask(test, target)
+    factor = test["dctr_factor"].to_numpy(dtype=np.float64, copy=False)[mask]
+    factor = factor[np.isfinite(factor) & (factor > 0)]
+    if not len(factor):
+        raise ValueError(f"{channel}/{target}: no positive finite DCTR factors to plot")
+
+    summary = dctr_factor_summary(test, target, channel_dir)
+    cap = summary["cap"]
+
+    xmax = float(np.quantile(factor, qmax))
+    xmax = max(xmax, 1.0, np.finfo(np.float64).eps)
+    edges = np.linspace(0.0, xmax, bins + 1)
+
     fig, ax = plt.subplots(figsize=(7, 5))
-    ax.hist(f, bins=edges, density=True, histtype="step", color="darkorange")
-    ax.axvline(1.0, color="k", ls="--", lw=1)
+    ax.hist(factor, bins=edges, density=True, histtype="step", color="darkorange")
+    ax.axvline(1.0, color="k", ls="--", lw=1, label="factor = 1")
+    if np.isfinite(cap) and cap <= xmax:
+        ax.axvline(cap, color="tab:red", ls=":", lw=1.5, label=f"cap = {cap:.3g}")
     ax.set_yscale("log")
-    ax.set_xlabel("out-of-sample DCTR factor")
+    ax.set_xlabel("applied out-of-sample DCTR factor")
     ax.set_ylabel("normalized MC density")
     ax.set_title(f"{channel}: {target} DCTR factors on outer test")
+    ax.legend(fontsize=9)
     fig.tight_layout()
     fig.savefig(outdir / f"outer_test_dctr_factors_{channel}.png", dpi=170)
     plt.close(fig)
+
+    # Full dynamic-range view: useful for spotting saturation at epsilon or
+    # 1-epsilon, which can be hidden by a linear-axis bulk plot.
+    log_factor = np.log10(factor)
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.hist(log_factor, bins=bins, density=True, histtype="step", color="darkorange")
+    ax.axvline(0.0, color="k", ls="--", lw=1, label="factor = 1")
+    if np.isfinite(cap) and cap > 0:
+        ax.axvline(np.log10(cap), color="tab:red", ls=":", lw=1.5, label=f"cap = {cap:.3g}")
+    ax.set_xlabel(r"$\log_{10}$(applied DCTR factor)")
+    ax.set_ylabel("normalized MC density")
+    ax.set_title(f"{channel}: {target} DCTR factor dynamic range")
+    ax.legend(fontsize=9)
+    fig.tight_layout()
+    fig.savefig(outdir / f"outer_test_dctr_factors_log10_{channel}.png", dpi=170)
+    plt.close(fig)
+
+    summary_row = {"channel": channel, "dctr_target": target, **summary}
+    pd.DataFrame([summary_row]).to_csv(
+        outdir / f"outer_test_dctr_factor_summary_{channel}.csv",
+        index=False,
+    )
+
+    print(f"\n[{channel}] {target} outer-test DCTR factor diagnostics")
+    for key in (
+        "n_events", "min", "q01", "q05", "median", "q95", "q99", "max",
+        "mean", "weighted_mean", "cap", "fraction_at_cap",
+        "fraction_lt_0p1", "fraction_lt_0p01",
+    ):
+        print(f"  {key:20s}: {summary[key]}")
+
+    return summary
+
 
 
 def plot_factor_comparison(channel, test, outdir):
@@ -378,6 +489,14 @@ def parse_args():
     ap.add_argument("--range", dest="plot_range", nargs=2, type=float, default=None, metavar=("MIN", "MAX"),
                     help="one common range for all --vars; omit for each variable's finite min/max")
     ap.add_argument("--normalization", choices=["shape", "physical"], default="shape")
+    ap.add_argument(
+        "--plot-weights",
+        action="store_true",
+        help=(
+            "plot applied outer-test DCTR factors and write factor diagnostics "
+            "(quantiles, weighted mean, cap pile-up, and small-factor fractions)"
+        ),
+    )
     ap.add_argument("--bootstrap-resamples", type=int, default=50)
     ap.add_argument("--bootstrap-subsample", type=int, default=0,
                     help="0 = full outer test; otherwise fixed paired subsample for faster iteration")
@@ -410,13 +529,28 @@ def main():
                 "dctr_inclusive": metrics_auc(dirs["inclusive"], "dctr"),
                 "dctr_dy_only": metrics_auc(dirs["dy_only"], "dctr"),
             }
-            plot_factor_comparison(channel, test, outdir)
+            if args.plot_weights:
+                test_inclusive = test.copy()
+                test_inclusive["dctr_factor"] = test["dctr_factor_inclusive"].to_numpy()
+                plot_dctr_weights_single(
+                    channel, test_inclusive, outdir, "inclusive", dirs["inclusive"],
+                )
+
+                test_dy_only = test.copy()
+                test_dy_only["dctr_factor"] = test["dctr_factor_dy_only"].to_numpy()
+                plot_dctr_weights_single(
+                    channel, test_dy_only, outdir, "dy_only", dirs["dy_only"],
+                )
+                plot_factor_comparison(channel, test, outdir)
         else:
             test, y, stages, channel_dir = load_single(args.root, channel, args.dctr_target)
             stage_order = BASE_STAGES
             labels, colors = SINGLE_LABELS, SINGLE_COLORS
             aucs = {stage: metrics_auc(channel_dir, stage) for stage in BASE_STAGES}
-            plot_dctr_factors_single(channel, test, outdir, args.dctr_target)
+            if args.plot_weights:
+                plot_dctr_weights_single(
+                    channel, test, outdir, args.dctr_target, channel_dir,
+                )
 
         plot_classifier_scores(channel, y, stages, labels, colors, outdir)
         plot_roc(channel, y, stages, aucs, labels, colors, outdir)
@@ -456,3 +590,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

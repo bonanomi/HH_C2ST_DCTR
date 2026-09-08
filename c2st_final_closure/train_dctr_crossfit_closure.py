@@ -39,6 +39,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import c2st_config as cfg
 import dyvr_lib
+from c2st_models import build_binary_classifier
 from c2st_core import (
     apply_scaler,
     fit_scaler,
@@ -58,20 +59,29 @@ def target_root(base: Path, dctr_target: str) -> Path:
     return base if dctr_target == "inclusive" else base / dctr_target
 
 
-def build_model(n_features: int, seed: int) -> tf.keras.Model:
-    tf.keras.backend.clear_session()
-    tf.keras.utils.set_random_seed(seed)
-    layers = [tf.keras.layers.Input(shape=(n_features,))]
-    for n_nodes in cfg.HIDDEN:
-        layers.append(tf.keras.layers.Dense(n_nodes, activation="relu"))
-    layers.append(tf.keras.layers.Dense(1, activation="sigmoid"))
-    model = tf.keras.Sequential(layers)
-    model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=cfg.LEARNING_RATE),
-        loss="binary_crossentropy",
-    )
-    return model
 
+def build_standard_model(n_features: int, seed: int) -> tf.keras.Model:
+    """Build the fresh C2ST/closure classifier from the standard NN config."""
+    return build_binary_classifier(
+        n_features,
+        hidden=cfg.HIDDEN,
+        optimizer=cfg.OPTIMIZER,
+        learning_rate=cfg.LEARNING_RATE,
+        batch_normalization=cfg.BATCH_NORMALIZATION,
+        seed=seed,
+    )
+
+
+def build_dctr_model(n_features: int, seed: int) -> tf.keras.Model:
+    """Build a DCTR derivation classifier from the DCTR-specific config."""
+    return build_binary_classifier(
+        n_features,
+        hidden=cfg.DCTR_HIDDEN,
+        optimizer=cfg.DCTR_OPTIMIZER,
+        learning_rate=cfg.DCTR_LEARNING_RATE,
+        batch_normalization=cfg.DCTR_BATCH_NORMALIZATION,
+        seed=seed,
+    )
 
 def callbacks(verbose: int = 1):
     return [
@@ -161,10 +171,12 @@ def fit_binary_model(
     w_train = np.concatenate([wd_train, wm_train]).astype(np.float32, copy=False)
     w_val = np.concatenate([wd_val, wm_val]).astype(np.float32, copy=False)
 
-    model = build_model(x_train.shape[1], seed)
+    model = build_dctr_model(x_train.shape[1], seed)
     print(
         f"=== {label}: train={len(y_train):_}, val={len(y_val):_}, "
-        f"batch={cfg.BATCH_SIZE:_} ==="
+        f"batch={cfg.BATCH_SIZE:_}, optimizer={cfg.DCTR_OPTIMIZER}, "
+        f"lr={cfg.DCTR_LEARNING_RATE:g}, hidden={tuple(cfg.DCTR_HIDDEN)}, "
+        f"batchnorm={cfg.DCTR_BATCH_NORMALIZATION} ==="
     )
     model.fit(
         x_train,
@@ -238,10 +250,13 @@ def fit_dy_only_model(
         x_data, idx_data_val, x_mc, idx_non_dy_val, idx_dy_val, raw_before
     )
 
-    model = build_model(x_train.shape[1], seed)
+    model = build_dctr_model(x_train.shape[1], seed)
     print(
         f"=== {label}: train={len(y_train):_}, val={len(y_val):_}, "
-        f"batch={cfg.BATCH_SIZE:_}, signed target weights ==="
+        f"batch={cfg.BATCH_SIZE:_}, signed target weights, "
+        f"optimizer={cfg.DCTR_OPTIMIZER}, lr={cfg.DCTR_LEARNING_RATE:g}, "
+        f"hidden={tuple(cfg.DCTR_HIDDEN)}, "
+        f"batchnorm={cfg.DCTR_BATCH_NORMALIZATION} ==="
     )
     model.fit(
         x_train,
@@ -514,8 +529,12 @@ def train_closure_stage(
     w_val = np.concatenate([wd_val, wm_val]).astype(np.float32, copy=False)
     w_test = np.concatenate([wd_test, wm_test]).astype(np.float32, copy=False)
 
-    model = build_model(x_train.shape[1], seed)
-    print(f"=== closure [{channel}, {stage}] ===")
+    model = build_standard_model(x_train.shape[1], seed)
+    print(
+        f"=== closure [{channel}, {stage}]: optimizer={cfg.OPTIMIZER}, "
+        f"lr={cfg.LEARNING_RATE:g}, hidden={tuple(cfg.HIDDEN)}, "
+        f"batchnorm={cfg.BATCH_NORMALIZATION} ==="
+    )
     model.fit(
         x_train,
         y_train,
@@ -641,6 +660,20 @@ def main():
         "outer_test_size": cfg.TEST_SIZE,
         "outer_val_size_within_trainval": cfg.VAL_SIZE_WITHIN_TRAINVAL,
         "random_state": cfg.RANDOM_STATE,
+        "model_config": {
+            "closure_c2st": {
+                "hidden": list(cfg.HIDDEN),
+                "batch_normalization": bool(cfg.BATCH_NORMALIZATION),
+                "optimizer": cfg.OPTIMIZER,
+                "learning_rate": cfg.LEARNING_RATE,
+            },
+            "dctr": {
+                "hidden": list(cfg.DCTR_HIDDEN),
+                "batch_normalization": bool(cfg.DCTR_BATCH_NORMALIZATION),
+                "optimizer": cfg.DCTR_OPTIMIZER,
+                "learning_rate": cfg.DCTR_LEARNING_RATE,
+            },
+        },
         "stages": {
             "before": "weight_uncorrected",
             "dy": "weight (official DY correction included)",

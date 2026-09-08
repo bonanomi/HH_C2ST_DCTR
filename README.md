@@ -133,3 +133,9 @@ Start by reading the relevant [`README`](c2st_final_closure/README.md).
 
 The final cross-fit closure framework supports two DCTR definitions.  The historical `inclusive` mode learns Data versus the full pre-DY MC mixture and reweights all MC.  The new `dy_only` mode learns DY versus `Data - non-DY MC` and applies the learned factor only to DY.  Both use the same outer split, k-fold leakage protection, DCTR capping and fresh closure C2ST.  See [`c2st_final_closure/README.md`](c2st_final_closure/README.md) for commands and interpretation.
 
+The DCTR network architecture is configurable in `c2st_config.py` through
+`DCTR_HIDDEN`, `DCTR_BATCH_NORMALIZATION`, `DCTR_OPTIMIZER`, and
+`DCTR_LEARNING_RATE`. The current default is `BatchNorm -> Dense(50, ReLU) -> sigmoid`
+with SGD at learning rate `5e-3`. Fresh closure C2ST networks keep a separate
+standard profile (`HIDDEN`, `BATCH_NORMALIZATION`, `OPTIMIZER`, `LEARNING_RATE`).
+

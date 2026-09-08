@@ -20,21 +20,19 @@ from c2st_artifacts import (
     model_path, save_metadata, save_scaler, save_stage_arrays, save_stage_metrics, save_test_fold,
 )
 from c2st_core import apply_scaler, fit_scaler, split_class_indices, stage_weights, weighted_bce
+from c2st_models import build_binary_classifier
 
 
 def build_model(n_features: int):
-    tf.keras.backend.clear_session()
-    tf.random.set_seed(cfg.RANDOM_STATE)
-    layers = [tf.keras.layers.Input(shape=(n_features,))]
-    for n_nodes in cfg.HIDDEN:
-        layers.append(tf.keras.layers.Dense(n_nodes, activation='relu'))
-    layers.append(tf.keras.layers.Dense(1, activation='sigmoid'))
-    model = tf.keras.Sequential(layers)
-    model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=cfg.LEARNING_RATE),
-        loss='binary_crossentropy',
+    """Build the standard C2ST classifier from c2st_config.py."""
+    return build_binary_classifier(
+        n_features,
+        hidden=cfg.HIDDEN,
+        optimizer=cfg.OPTIMIZER,
+        learning_rate=cfg.LEARNING_RATE,
+        batch_normalization=cfg.BATCH_NORMALIZATION,
+        seed=cfg.RANDOM_STATE,
     )
-    return model
 
 
 def channel_tables(tables, channel):
@@ -151,6 +149,9 @@ def main():
         'test_size': cfg.TEST_SIZE,
         'val_size_within_trainval': cfg.VAL_SIZE_WITHIN_TRAINVAL,
         'hidden': list(cfg.HIDDEN),
+        'batch_normalization': cfg.BATCH_NORMALIZATION,
+        'optimizer': cfg.OPTIMIZER,
+        'learning_rate': cfg.LEARNING_RATE,
         'batch_size': cfg.BATCH_SIZE,
     })
 

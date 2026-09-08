@@ -70,10 +70,26 @@ RANDOM_STATE = 0
 
 # NN hyperparameters
 
-HIDDEN = (128, 128, 128)
+# Standard C2ST / fresh closure-classifier profile.
+HIDDEN = (50,)  # e.g. (128, 128, 128) for three hidden layers
+BATCH_NORMALIZATION = False
+OPTIMIZER = "adam"
+LEARNING_RATE = 1e-3
+
+# DCTR-derivation profile.
+# Current default:
+#   BatchNorm -> Dense(50, ReLU) -> sigmoid
+# trained with SGD at learning rate 5e-3.
+#
+# By default DCTR reuses the HIDDEN layout. Override DCTR_HIDDEN explicitly
+# if you want a different architecture for correction derivation.
+DCTR_HIDDEN = HIDDEN
+DCTR_BATCH_NORMALIZATION = True
+DCTR_OPTIMIZER = "sgd"
+DCTR_LEARNING_RATE = 5e-3
+
 EPOCHS = 50
 BATCH_SIZE = 8192
-LEARNING_RATE = 1e-3
 EARLY_STOPPING_PATIENCE = 5
 REDUCE_LR_PATIENCE = 2
 REDUCE_LR_FACTOR = 0.2

@@ -75,6 +75,52 @@ For convenience the stored `dctr_factor` is exactly `1` for non-DY MC, so `weigh
 
 This construction is the DY analogue of CMS DCTR applications in which a target process is trained against Data after subtraction of the other simulated backgrounds.
 
+
+## Configuring the DCTR classifier
+
+The classifier builder is shared and generic; the DY-only training function no longer hard-codes a special network.
+
+The DCTR derivation uses these settings from `c2st_config.py`:
+
+```python
+DCTR_HIDDEN = HIDDEN
+DCTR_BATCH_NORMALIZATION = True
+DCTR_OPTIMIZER = "sgd"
+DCTR_LEARNING_RATE = 5e-3
+```
+
+With the current `HIDDEN = (50,)`, this gives
+
+```text
+Input
+  |
+BatchNormalization
+  |
+Dense(50, ReLU)
+  |
+Dense(1, sigmoid)
+```
+
+`DCTR_HIDDEN = HIDDEN` means DCTR follows the standard hidden-layer layout by default, but it can be overridden independently. For example:
+
+```python
+HIDDEN = (50,)
+DCTR_HIDDEN = (64, 32)
+```
+
+The fresh closure C2ST classifiers use the separate standard settings
+
+```python
+HIDDEN
+BATCH_NORMALIZATION
+OPTIMIZER
+LEARNING_RATE
+```
+
+so the network used to derive the correction can be changed without silently changing the network used to measure closure.
+
+The external feature scaler and BatchNorm have different roles. The scaler is fitted once on outer-train events and then frozen. BatchNorm is an internal trainable layer using batch statistics during training. It is therefore not required merely because the inputs are already scaled; it remains configurable because it can affect optimization stability.
+
 ## Statistical layout
 
 Both target modes use the same leakage protection:

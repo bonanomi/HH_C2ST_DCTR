@@ -690,6 +690,47 @@ It never trains on `hold_d` or `hold_m`.
 
 ---
 
+
+# Configurable DCTR model architecture
+
+DCTR and closure classifiers are built through the same reusable `build_binary_classifier(...)` helper, but use separate configuration profiles.
+
+The DCTR profile is
+
+```python
+DCTR_HIDDEN = HIDDEN
+DCTR_BATCH_NORMALIZATION = True
+DCTR_OPTIMIZER = "sgd"
+DCTR_LEARNING_RATE = 5e-3
+```
+
+With `HIDDEN = (50,)`, the default DCTR network is
+
+```text
+scaled inputs
+    |
+BatchNormalization
+    |
+Dense(50, ReLU)
+    |
+Dense(1, sigmoid)
+```
+
+Both `inclusive` and `dy_only` DCTR derivation use this profile.
+
+Fresh closure C2ST classifiers instead use
+
+```python
+HIDDEN
+BATCH_NORMALIZATION
+OPTIMIZER
+LEARNING_RATE
+```
+
+so DCTR optimization choices remain separate from the diagnostic classifier.
+
+The external feature scaler is fixed after fitting on outer-train events. BatchNorm is part of the trainable network, so it is not needed simply to rescale the inputs. Its use is an optimization choice and can be switched off with `DCTR_BATCH_NORMALIZATION = False`.
+
 # 17. Exactly which weights are passed to a cross-fit DCTR network?
 
 The fold model is trained through
