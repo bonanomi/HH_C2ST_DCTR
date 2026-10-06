@@ -12,6 +12,7 @@ import warnings
 import numpy as np
 from .config import process_entries, safe_name, write_json
 from .loading import load_side
+from .plot_cache import cached_population
 
 
 def load_population(config, year, channel, region, features):
@@ -162,6 +163,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--cache-dir', type=Path, help='Reusable selected-table cache on shared disk')
+    parser.add_argument('--refresh-cache', action='store_true', help='Rebuild matching cache entries')
     args = parser.parse_args()
     config = runpy.run_path(str(args.config.resolve()))['PLOT_CONFIG']
     if args.output.exists() and any(args.output.iterdir()):
@@ -181,7 +184,8 @@ def main():
             diagnostics = {}
             for year in ('2024', '2025'):
                 print(f'Loading {year}, {channel}, {region}', flush=True)
-                data, mc = load_population(config, year, channel, region, features)
+                data, mc = cached_population(config, year, channel, region, features, load_population,
+                                             args.cache_dir, args.refresh_cache)
                 factor = np.ones(len(mc), dtype=float)
                 diagnostics[year] = {'data_sumw': float(data.weight.sum()), 'mc_sumw': float(mc.weight.sum()),
                                      'data_rows': len(data), 'mc_rows': len(mc)}
@@ -213,7 +217,11 @@ def main():
                         draw(data, mc, factor, name, spec, config, year, channel, region, 'dctr', folder)
                 del data, mc
             write_json(folder / 'yields_and_factors.json', diagnostics)
+            if config.get('mc_comparison', {}).get('enabled', False):
+                from .mc_comparison import compare_folder
+                compare_folder(folder, folder / 'mc_comparison', config)
 
 
 if __name__ == '__main__':
     main()
+

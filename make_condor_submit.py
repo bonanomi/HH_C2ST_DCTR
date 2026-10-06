@@ -11,9 +11,9 @@ from pathlib import Path
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Generate HTCondor wrapper and submit files for C2ST/DCTR training."
+        description="Generate HTCondor wrapper and submit files for C2ST/DCTR training or year plots."
     )
-    parser.add_argument("--task", choices=("main", "closure"), required=True)
+    parser.add_argument("--task", choices=("main", "closure", "year-plots"), required=True)
     parser.add_argument("--repo-dir", type=Path, default=Path.cwd())
     parser.add_argument("--conda-base", default="~/miniforge3")
     parser.add_argument("--conda-env", default="c2st")
@@ -45,6 +45,10 @@ def build_command(args, extra):
         if args.channels is not None or args.folds is not None:
             raise ValueError("--channels/--folds are only valid for --task closure.")
         cmd = ["python", "-u", "c2st_nn.py"]
+    elif args.task == "year-plots":
+        if args.channels is not None or args.folds is not None:
+            raise ValueError("Set plot channels in the plot config; folds do not apply.")
+        cmd = ["python", "-u", "-m", "dctr_c2st_generic.plot_year_transfer"]
     else:
         cmd = ["python", "-u", "-m", "c2st_final_closure.train_dctr_crossfit_closure"]
         if args.channels:
@@ -91,6 +95,14 @@ def main():
     else:
         conda_assignment = f"CONDA_BASE={shlex.quote(args.conda_base)}"
 
+    if args.task == "year-plots":
+        defaults = {"TF_FORCE_GPU_ALLOW_GROWTH": "true", "OMP_NUM_THREADS": str(args.cpus),
+                    "TF_NUM_INTRAOP_THREADS": str(args.cpus), "TF_NUM_INTEROP_THREADS": "1"}
+        if args.gpus == 0:
+            defaults["CUDA_VISIBLE_DEVICES"] = "-1"
+        explicit = {item.split("=", 1)[0] for item in args.environment}
+        args.environment = [f"{k}={v}" for k,v in defaults.items() if k not in explicit] + args.environment
+
     exports = "\n".join(
         f"export {shlex.quote(k)}={shlex.quote(v)}"
         for k, v in (item.split("=", 1) for item in args.environment)
@@ -128,6 +140,8 @@ which python
 python --version
 
 echo
+{exports}
+
 echo "TensorFlow devices:"
 python -c 'import tensorflow as tf; print("TensorFlow:", tf.__version__); print("GPUs:", tf.config.list_physical_devices("GPU"))'
 
@@ -135,8 +149,6 @@ if command -v nvidia-smi >/dev/null 2>&1; then
     echo
     nvidia-smi || true
 fi
-
-{exports}
 
 echo
 echo "Command:"
@@ -200,7 +212,7 @@ exit "$status"
     print(f"Generated submit:  {submit}")
     print(f"Log directory:     {logs}")
     print()
-    print("Training command:")
+    print("Job command:")
     print(" ", shell_join(cmd))
     print()
     print("Submit with:")
@@ -215,3 +227,4 @@ exit "$status"
 
 if __name__ == "__main__":
     main()
+

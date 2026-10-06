@@ -90,6 +90,19 @@ def category_mask(categories, ids):
 
 
 def load_side(cfg, side, channel):
+    # Index each producer/dataset once per load, rather than globbing all
+    # branch files again for every branch. No cache survives this call.
+    file_index, producer_index = {}, {}
+    def indexed_files(directory, dataset, shift):
+        key = (str(directory), dataset, shift)
+        if key not in file_index:
+            file_index[key] = branch_files(directory, dataset, shift)
+        return file_index[key]
+    def indexed_producer(source_name, source, producer):
+        key = (source_name, producer)
+        if key not in producer_index:
+            producer_index[key] = producer_path(source, producer)
+        return producer_index[key]
     frames = []
     fields = list(dict.fromkeys(cfg["features"] + cfg["validation_vars"] + list(cfg["selections"])))
     for process, entry in cfg[f"{side}_processes"].items():
@@ -111,7 +124,7 @@ def load_side(cfg, side, channel):
             if source.get("format", "cf") == "cf":
                 if not source.get("alignment_ok", {}).get(dataset, False):
                     raise ValueError(f"{source_name}/{dataset}: verify alignment and set alignment_ok; no silent skipping")
-                paths = branch_files(source["reduction_dir"], dataset, source.get("shift", "nominal"))
+                paths = indexed_files(source["reduction_dir"], dataset, source.get("shift", "nominal"))
             elif source["format"] == "parquet":
                 # Explicit prejoined tables: datasets are paths/globs under root.
                 paths = dict(enumerate(sorted(Path(source["root"]).glob(dataset))))
@@ -127,8 +140,8 @@ def load_side(cfg, side, channel):
                     def fetch(producer, column, optional=False):
                         key = (producer, column)
                         if key not in cache:
-                            directory = producer_path(source, producer)
-                            file = branch_files(directory, dataset, source.get("shift", "nominal")).get(branch) if directory else None
+                            directory = indexed_producer(source_name, source, producer)
+                            file = indexed_files(directory, dataset, source.get("shift", "nominal")).get(branch) if directory else None
                             import pyarrow.parquet as pq
                             wanted = requested.get(producer, {column: optional})
                             schema = set(pq.read_schema(file).names) if file is not None else set()
@@ -221,3 +234,4 @@ def prepare_tables(target, base, cfg):
         report[side]["classifier_sumw"] = float(selected.weight_before.sum())
         result.append(selected)
     return *result, report
+
