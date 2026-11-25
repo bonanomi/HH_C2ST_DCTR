@@ -18,6 +18,11 @@ from .plot_cache import cached_population
 def load_population(config, year, channel, region, features):
     """Use the generic loader with explicit physical weight definitions."""
     yc = config['years'][year]
+    variations = config.get('mc_weight_variations', {})
+    for name in variations:
+        safe_name(name)
+        if name == 'before':
+            raise ValueError('Reserved MC variation name: before')
     processes = {}
     for side in ('data', 'mc'):
         processes[side] = process_entries(yc[f'{side}_processes'])
@@ -25,6 +30,8 @@ def load_population(config, year, channel, region, features):
             if 'weights' in entry or 'reference_weights' in entry:
                 raise ValueError('Set plot weights using data_weights/mc_weights/dy_weight, not process overrides')
             entry['weights'] = deepcopy(yc[f'{side}_weights'])
+            if side == 'mc':
+                entry['reference_weights'] = {name: deepcopy(weight) for name, weight in variations.items()}
             if side == 'mc' and entry.get('is_dy', False) and yc.get('dy_weight'):
                 if entry['weights']['mode'] != 'product':
                     raise ValueError('DY correction requires product weights')
@@ -36,7 +43,7 @@ def load_population(config, year, channel, region, features):
                features=list(features), validation_vars=[], selections=config.get('selections', {}),
                channels=config['channels'], channel_ids=config['channel_ids'],
                regions=[region], region_ids=config['region_ids'],
-               subtract_processes=[], reference_stages=[])
+               subtract_processes=[], reference_stages=list(variations))
     data = load_side(cfg, 'target', channel)
     mc = load_side(cfg, 'base', channel)
     if set(data.event_id) & set(mc.event_id):
@@ -215,11 +222,35 @@ def main():
                         signed_weighted_mean_factor=float(np.sum(weights*factor)/weights.sum()) if weights.sum() != 0 else None)
                     for name, spec in config['observables'].items():
                         draw(data, mc, factor, name, spec, config, year, channel, region, 'dctr', folder)
+                for variation in config.get('mc_weight_variations', {}):
+                    variation_folder = folder / 'mc_variations' / variation
+                    variation_folder.mkdir(parents=True, exist_ok=True)
+                    variation_weights = mc[f'weight_{variation}'].to_numpy(dtype=float)
+                    for name, spec in config['observables'].items():
+                        components = {}
+                        for label in config['years'][year]['mc_processes']:
+                            mask = mc.process.to_numpy() == label
+                            h, v = histogram(mc.loc[mask, name], variation_weights[mask],
+                                             spec['edges'], spec.get('flow', 'drop'))
+                            components[label] = {'sumw': h, 'sumw2': v}
+                        write_json(variation_folder / f'{safe_name(name)}_{year}_nominal.json',
+                            dict(edges=spec['edges'], flow=spec.get('flow', 'drop'),
+                                 mc=sum(item['sumw'] for item in components.values()),
+                                 mc_sumw2=sum(item['sumw2'] for item in components.values()),
+                                 components=components,
+                                 weight_spec=config['mc_weight_variations'][variation]))
                 del data, mc
             write_json(folder / 'yields_and_factors.json', diagnostics)
             if config.get('mc_comparison', {}).get('enabled', False):
                 from .mc_comparison import compare_folder
                 compare_folder(folder, folder / 'mc_comparison', config)
+                for variation in config.get('mc_weight_variations', {}):
+                    variation_folder = folder / 'mc_variations' / variation
+                    comparison_config = deepcopy(config)
+                    comparison_config['mc_comparison']['stages'] = ['nominal']
+                    comparison_config['mc_comparison']['weight_label'] = variation
+                    comparison_config['mc_comparison']['context_label'] = f'{channel}, {region}'
+                    compare_folder(variation_folder, variation_folder / 'plots', comparison_config)
 
 
 if __name__ == '__main__':

@@ -11,9 +11,10 @@ from pathlib import Path
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Generate HTCondor wrapper and submit files for C2ST/DCTR training or year plots."
+        description="Generate HTCondor wrapper and submit files for C2ST/DCTR training and plots."
     )
-    parser.add_argument("--task", choices=("main", "closure", "year-plots"), required=True)
+    parser.add_argument("--task", choices=("main", "training", "closure", "year-plots", "signed-plots"), required=True,
+                        help="training: generic DCTR; main: legacy c2st_nn.py")
     parser.add_argument("--repo-dir", type=Path, default=Path.cwd())
     parser.add_argument("--conda-base", default="~/miniforge3")
     parser.add_argument("--conda-env", default="c2st")
@@ -45,6 +46,14 @@ def build_command(args, extra):
         if args.channels is not None or args.folds is not None:
             raise ValueError("--channels/--folds are only valid for --task closure.")
         cmd = ["python", "-u", "c2st_nn.py"]
+    elif args.task == "training":
+        if args.channels is not None or args.folds is not None:
+            raise ValueError("Set training channels and folds in the training config.")
+        cmd = ["python", "-u", "-m", "dctr_c2st_generic.training"]
+    elif args.task == "signed-plots":
+        if args.channels is not None or args.folds is not None:
+            raise ValueError("Use --channel-dir after -- for signed-plots; folds are read from the saved run.")
+        cmd = ["python", "-u", "-m", "dctr_c2st_generic.plot_signed_physical"]
     elif args.task == "year-plots":
         if args.channels is not None or args.folds is not None:
             raise ValueError("Set plot channels in the plot config; folds do not apply.")
@@ -95,7 +104,7 @@ def main():
     else:
         conda_assignment = f"CONDA_BASE={shlex.quote(args.conda_base)}"
 
-    if args.task == "year-plots":
+    if args.task in ("training", "year-plots", "signed-plots"):
         defaults = {"TF_FORCE_GPU_ALLOW_GROWTH": "true", "OMP_NUM_THREADS": str(args.cpus),
                     "TF_NUM_INTRAOP_THREADS": str(args.cpus), "TF_NUM_INTEROP_THREADS": "1"}
         if args.gpus == 0:
@@ -119,12 +128,15 @@ echo "host:    $(hostname)"
 echo "============================================================"
 
 {conda_assignment}
-if [[ ! -f "$CONDA_BASE/bin/activate" ]]; then
-    echo "ERROR: missing $CONDA_BASE/bin/activate"
+if [[ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]]; then
+    source "$CONDA_BASE/etc/profile.d/conda.sh"
+elif [[ -f "$CONDA_BASE/bin/activate" ]]; then
+    source "$CONDA_BASE/bin/activate"
+else
+    echo "ERROR: missing Conda activation scripts under $CONDA_BASE"
     exit 2
 fi
 
-source "$CONDA_BASE/bin/activate"
 conda activate {shlex.quote(args.conda_env)}
 
 cd {shlex.quote(str(repo))}
@@ -171,6 +183,7 @@ exit "$status"
     submit = job_dir / "job.sub"
     lines = [
         "universe = vanilla",
+        f"initialdir = {repo}",
         f"executable = {wrapper}",
         "",
         "should_transfer_files = NO",
@@ -227,4 +240,5 @@ exit "$status"
 
 if __name__ == "__main__":
     main()
+
 
