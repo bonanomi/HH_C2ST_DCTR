@@ -109,7 +109,7 @@ def load_signed_cached(cfg, side, channel, cache_dir=None, refresh=False):
     return result
 
 
-def match_rows(full, saved, side):
+def match_rows(full, saved, side, signed=False):
     if full.event_id.duplicated().any() or saved.event_id.duplicated().any():
         raise ValueError(f'{side}: duplicate event IDs')
     index = pd.Index(full.event_id)
@@ -122,6 +122,10 @@ def match_rows(full, saved, side):
             raise ValueError(f'{side}: changed {name}')
     if not np.allclose(matched.weight_before, saved.weight_before, rtol=1e-6, atol=1e-8):
         raise ValueError(f'{side}: changed physical weights')
+    if signed:
+        if len(saved) != len(full):
+            raise ValueError(f'{side}: signed-MSE archive must cover all selected rows')
+        return positions
     if not np.all(saved.weight_before.to_numpy() > 0):
         raise ValueError(f'{side}: unexpected nonpositive classifier weights')
     if np.count_nonzero(full.weight_before.to_numpy() > 0) != len(saved):
@@ -208,7 +212,7 @@ def run(channel_dir, output, chunk_size=65536, save_events=False, cache_dir=None
     population = json.loads((channel_dir/'population.json').read_text())
     for side, full in [('target',data),('base',mc)]:
         saved = pd.read_parquet(channel_dir/f'{side}_rows.parquet')
-        positions = match_rows(full, saved, side)
+        positions = match_rows(full, saved, side, signed=cfg["dctr_objective"] == "signed_mse")
         old = population[side]
         if len(full) != old['full_rows'] or not np.isclose(full.weight_before.to_numpy(dtype=float).sum(), old['full_signed_sumw'], rtol=1e-6, atol=1e-5):
             raise ValueError(f'{side}: full population differs from training report')
@@ -230,7 +234,7 @@ def run(channel_dir, output, chunk_size=65536, save_events=False, cache_dir=None
     provenance = np.full(len(mc), -1, dtype=np.int16)
     provenance[full_scope] = cfg['folds']+1
     factor[base_positions], provenance[base_positions] = saved_factor, folds
-    excluded = np.flatnonzero((mc.weight_before.to_numpy() <= 0) & full_scope)
+    excluded = np.flatnonzero(provenance == cfg["folds"] + 1)
     print(f'Reusing saved factors for {scope.sum():,} corrected classifier events; '
           f'evaluating {len(excluded):,} excluded corrected events; '
           f'keeping {np.count_nonzero(~full_scope):,} other events unchanged', flush=True)

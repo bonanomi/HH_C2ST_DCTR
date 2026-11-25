@@ -158,9 +158,11 @@ normalization closure. Inspect `yield_closure.json` and the physical plots too.
 For signed subtraction, inspect all losses, factor quantiles, weighted mean,
 cap fraction and closure plots before interpreting the correction.
 
-The training closure sample excludes nonpositive nominal weights, matching the
-old workflow. Its plots are **not a full signed-MC closure measurement**. The
-full signed application must be validated separately on analysis samples.
+With the default BCE objective, the outer-test population contains positive
+nominal weights only. With `dctr_objective="signed_mse"`, the physical
+outer-test plots and yields include all signs, while the separate closure
+BCE/AUC still uses positive nominal rows only. See CONFIGURATION.md for
+the signed trial and split conventions.
 
 Rebuild plots without retraining:
 

@@ -48,7 +48,7 @@ def load_full(channel_dir, cache_dir, chunk_size=65536, refresh_cache=False):
     population = json.loads((channel_dir/'population.json').read_text())
     for side, full in [('target',data),('base',mc)]:
         saved = pd.read_parquet(channel_dir/f'{side}_rows.parquet')
-        positions = match_rows(full, saved, side)
+        positions = match_rows(full, saved, side, signed=cfg["dctr_objective"] == "signed_mse")
         old = population[side]
         if len(full) != old['full_rows'] or not np.isclose(full.weight_before.to_numpy(dtype=float).sum(), old['full_signed_sumw'], rtol=1e-6, atol=1e-5):
             raise ValueError(f'{side}: full population differs from training report')
@@ -70,7 +70,7 @@ def load_full(channel_dir, cache_dir, chunk_size=65536, refresh_cache=False):
     provenance = np.full(len(mc), -1, dtype=np.int16)
     provenance[full_scope] = cfg['folds']+1
     factor[base_positions], provenance[base_positions] = saved_factor, folds
-    excluded = np.flatnonzero((mc.weight_before.to_numpy() <= 0) & full_scope)
+    excluded = np.flatnonzero(provenance == cfg["folds"] + 1)
     print(f'Reusing saved factors for {scope.sum():,} corrected classifier events; '
           f'evaluating {len(excluded):,} excluded corrected events; '
           f'keeping {np.count_nonzero(~full_scope):,} other events unchanged', flush=True)

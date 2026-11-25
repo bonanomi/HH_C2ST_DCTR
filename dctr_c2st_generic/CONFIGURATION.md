@@ -254,3 +254,40 @@ applying to a new process/year intentionally. Fixed components return one.
 
 There is no feature-based overlap detection at inference. Do not apply a final
 bundle to its training population and call that an independent closure test.
+
+## Opt-in signed-weight DCTR
+
+Set `dctr_objective="signed_mse"` in a generic config. The default, `"bce"`,
+retains the historical positive nominal weight filter. Legacy compatibility
+profiles do not accept the new objective. For a two-input 2024 DY-only trial
+use `configs/config_data_mc24_dy_only_signed_mse.py`; it reads the completed
+baseline's config.json from the repository root, not its models or factors.
+Set its `previous` path if your baseline has another name. It inherits the
+verified sources, weights, architecture, optimizer, batch size and cap settings.
+MET and dilepton mass are validation columns, not inputs to this model.
+
+The opt-in objective minimizes signed sample-weighted, per-event squared error
+on the sigmoid output (CMS arXiv:2411.03023, adapted to the subtracted Data target).
+For yield normalization the label/weight pairs are Data (1, +1), subtracted
+non-DY (1, -physical weight), and corrected DY (0, +physical weight).
+For generic weighted targets the configured target weight replaces +1.
+Only one common positive loss scale is applied (mean absolute sample weight
+set to one). Shape normalization additionally balances the corrected base against
+the signed residual training yield. The inference factor remains capped p/(1-p).
+Zero-weight rows stay in the cohort and have zero loss weight.
+
+This is a **fresh training and split** over the full selected rows: do not reuse
+old splits, indices, caps or factors. Train/validation/hold exclusion is unchanged.
+Each corrected row of either sign gets the factor of its held-out fold, or the
+final model on the outer test. The cap is still the configured unweighted quantile
+of odds on corrected *validation* rows for that fit. Subtracted rows retain unity.
+Both full-population plotters reuse the saved factors; negative signed-MSE rows
+are not reevaluated with a model that may have trained on them.
+
+The separate closure BCE/scaler/AUC uses positive nominal rows of those same
+outer splits (closure_* indices in splits.npz); its ROC is not a signed ROC.
+Use outer_test_fold.parquet and yield_closure.json for held-out signed yields.
+Check population.json, dctr_*_history.json, dctr_*_diagnostics.json and plots:
+loss finiteness and stability, factor quantiles, weighted means by sign and
+fraction at cap. A negative signed loss is possible. Compare signed closure
+with the official 2D correction; no additional post-fit yield rescaling is made.

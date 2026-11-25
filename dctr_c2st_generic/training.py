@@ -44,13 +44,20 @@ def callbacks(cfg):
 
 def fit_model(x, y, w, xv, yv, wv, cfg, profile, seed, output):
     from c2st_models import build_binary_classifier
-    model = build_binary_classifier(x.shape[1], seed=seed, **cfg[profile])
+    mse = profile == "dctr_model" and cfg.get("dctr_objective") == "signed_mse"
+    loss_name = "mean_squared_error" if mse else "binary_crossentropy"
+    model = build_binary_classifier(x.shape[1], seed=seed, loss=loss_name, **cfg[profile])
+    if mse:
+        # Keras MSE averages over its last axis: preserve the single output
+        # dimension so there is one squared residual per scalar sample weight.
+        y = y.astype(np.float32).reshape(-1, 1)
+        yv = yv.astype(np.float32).reshape(-1, 1)
     history = model.fit(x, y, sample_weight=w, validation_data=(xv, yv, wv),
                         epochs=cfg["epochs"], batch_size=cfg["batch_size"],
                         callbacks=callbacks(cfg), verbose=2).history
     loss, val = np.asarray(history["loss"]), np.asarray(history["val_loss"])
     stability = {
-        "history": history, "epochs_run": len(loss),
+        "loss_function": loss_name, "history": history, "epochs_run": len(loss),
         "finite": bool(np.all(np.isfinite(loss)) and np.all(np.isfinite(val))),
         "minimum_loss": float(np.min(loss)), "minimum_val_loss": float(np.min(val)),
         "negative_loss_seen": bool(np.any(loss < 0) or np.any(val < 0)),
@@ -62,7 +69,7 @@ def fit_model(x, y, w, xv, yv, wv, cfg, profile, seed, output):
     if not stability["finite"]:
         raise FloatingPointError(f"Nonfinite training loss; inspect {output}")
     if stability["signed_weights"] and stability["negative_loss_seen"]:
-        print(f"WARNING: negative signed BCE observed; inspect loss stability and factors: {output}")
+        print(f"WARNING: negative signed {loss_name} observed; inspect loss stability and factors: {output}")
     return model
 
 
@@ -130,6 +137,11 @@ def fit_dctr_job(target, base, cfg, job, shared_scaler, output):
     raw = odds(predict(model, xb[job["hold_base"]], cfg), cfg["eps"])
     factors = (np.minimum(raw, cap) if cap is not None else raw).astype(np.float32)
     diagnostics = factor_summary(factors, wb[job["hold_base"]], cap)
+    if cfg.get("dctr_objective") == "signed_mse":
+        held_w = wb[job["hold_base"]]
+        diagnostics["held_by_sign"] = {}
+        for sign, mask in (("positive", held_w > 0), ("negative", held_w < 0), ("zero", held_w == 0)):
+            diagnostics["held_by_sign"][sign] = factor_summary(factors[mask], held_w[mask], cap) if mask.any() else {"count": 0}
     diagnostics["fraction_raw_above_cap"] = float(np.mean(raw > cap)) if cap is not None else 0.
     diagnostics["train_target_sumw"] = float(wt[t].sum(dtype=np.float64))
     diagnostics["train_subtract_sumw"] = float(wb[s].sum(dtype=np.float64))
@@ -172,6 +184,13 @@ def run_channel(target, base, cfg, output, channel, channel_i=0):
     target[identity].to_parquet(output / "target_rows.parquet", index=False)
     base[identity + ["corrected"]].to_parquet(output / "base_rows.parquet", index=False)
     provenance = dict(outer)
+    closure_outer = outer
+    if cfg.get("dctr_objective") == "signed_mse":
+        closure_outer = {}
+        for key, idx in outer.items():
+            frame = target if key.startswith("target_") else base
+            closure_outer[key] = idx[frame.weight_before.to_numpy()[idx] > 0]
+            provenance["closure_" + key] = closure_outer[key]
     for job in jobs:
         for split in ("train", "val"):
             for component, indices in zip(("target", "subtract", "base"), job[split]):
@@ -179,7 +198,11 @@ def run_channel(target, base, cfg, output, channel, channel_i=0):
         for key in ("hold_target", "hold_subtract", "hold_base"):
             provenance[f"{job['name']}_{key}"] = job[key]
     np.savez_compressed(output / "splits.npz", **provenance)
-    closure_scaler = fit_transformer(target, base, outer["target_train"], outer["base_train"], cfg)
+    # Keep the ordinary BCE/ROC diagnostic on positive nominal rows of the
+    # SAME outer split. Physical yields and DCTR folds always use outer itself.
+    if any(not len(idx) for idx in closure_outer.values()):
+        raise ValueError("An outer split has no positive rows for the closure C2ST")
+    closure_scaler = fit_transformer(target, base, closure_outer["target_train"], closure_outer["base_train"], cfg)
     joblib.dump(closure_scaler, output / "closure_scaler.joblib", compress=3)
     factors = np.ones(len(base), np.float32)
     fold_id = np.full(len(base), -1, np.int16)
@@ -202,7 +225,7 @@ def run_channel(target, base, cfg, output, channel, channel_i=0):
     xt, xb = transform(target, closure_scaler, cfg["features"]), transform(base, closure_scaler, cfg["features"])
     matrices = {}
     for split in ("train", "val", "test"):
-        it, ib = outer[f"target_{split}"], outer[f"base_{split}"]
+        it, ib = closure_outer[f"target_{split}"], closure_outer[f"base_{split}"]
         matrices[split] = (np.concatenate([xt[it], xb[ib]]).astype(np.float32),
                            np.concatenate([np.ones(len(it), np.uint8), np.zeros(len(ib), np.uint8)]))
     metrics = []
@@ -212,8 +235,15 @@ def run_channel(target, base, cfg, output, channel, channel_i=0):
         wb = base[f"weight_{stage}" if stage != "dctr" else "weight_before"].to_numpy()
         if stage == "dctr":
             wb = wb * factors
-        ws = {split: closure_weights(wt, wb, outer[f"target_{split}"], outer[f"base_{split}"],
-                                     outer["target_train"], outer["base_train"], cfg["compatibility"])
+        # Excluded rows never enter the matrices or normalizations above.
+        # Zero their slots only in closure's auxiliary arrays, leaving
+        # physical stage weights untouched for the signed yield diagnostics.
+        cwt, cwb = wt, wb
+        if cfg.get("dctr_objective") == "signed_mse":
+            cwt = np.where(target.weight_before.to_numpy() > 0, wt, 0.)
+            cwb = np.where(base.weight_before.to_numpy() > 0, wb, 0.)
+        ws = {split: closure_weights(cwt, cwb, closure_outer[f"target_{split}"], closure_outer[f"base_{split}"],
+                                     closure_outer["target_train"], closure_outer["base_train"], cfg["compatibility"])
               for split in ("train", "val", "test")}
         x, y = matrices["train"]
         xv, yv = matrices["val"]
@@ -222,7 +252,7 @@ def run_channel(target, base, cfg, output, channel, channel_i=0):
                           cfg["seed"] + 7000 + 100 * channel_i + i, output / f"closure_{stage}_history.json")
         p = predict(model, xte, cfg).astype(np.float32)
         auc = float(roc_auc_score(yte, p, sample_weight=ws["test"]))
-        metric = {"channel": channel, "stage": stage, "auc": auc, "distance_from_half": abs(auc - .5),
+        metric = {"channel": channel, "stage": stage, "population": "positive nominal weights only", "auc": auc, "distance_from_half": abs(auc - .5),
                   "weighted_bce": weighted_bce(yte, p, ws["test"]), "n_test": len(yte)}
         metrics.append(metric)
         model.save(output / f"closure_model_{stage}.keras")
@@ -240,7 +270,8 @@ def run_channel(target, base, cfg, output, channel, channel_i=0):
         del model
         tf.keras.backend.clear_session()
         gc.collect()
-    write_json(output / "yield_closure.json", {"population": "positive-weight classifier outer test",
+    write_json(output / "yield_closure.json", {"population": ("full signed outer test" if cfg.get("dctr_objective") == "signed_mse"
+                                                              else "positive-weight classifier outer test"),
                                                "test_fraction_target": len(test_t) / len(target),
                                                "test_fraction_base": len(test_b) / len(base), "stages": yields})
     if cfg["plots"]:

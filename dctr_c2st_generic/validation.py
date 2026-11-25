@@ -38,7 +38,7 @@ def validate_channel(directory, cfg):
         for key in ("loss", "val_loss"):
             values = record["history"][key]
             ax.plot(np.arange(1, len(values) + 1), values, label=key)
-        ax.set(xlabel="Epoch", ylabel="Weighted BCE", title=path.stem)
+        ax.set(xlabel="Epoch", ylabel=("Signed weighted MSE" if record.get("loss_function") == "mean_squared_error" else "Weighted BCE"), title=path.stem)
         ax.legend(); fig.tight_layout(); fig.savefig(plotdir / f"{path.stem}.png", dpi=140); plt.close(fig)
     aucs = [json.loads((directory / f"closure_{s}_metrics.json").read_text())["auc"] for s in stages]
     fig, ax = plt.subplots(figsize=(6.8, 4.2))
@@ -80,7 +80,7 @@ def validate_channel(directory, cfg):
             ratio.axhline(1., color="k", ls="--"); ratio.set(xlabel=feature, ylabel="Base/target")
             fig.tight_layout(); fig.savefig(plotdir / f"{j:03d}_{filename(feature)}_{mode}.png", dpi=140); plt.close(fig)
     write_json(plotdir / "README.json", {
-        "population": "Positive-weight classifier outer test; NOT full signed-MC closure",
+        "population": fractions["population"], "auc_population": "positive nominal weights only",
         "uncertainties": "sumw2 only; no learned-factor uncertainty or cross-bin covariance",
         "yield_closure": "../yield_closure.json", "normalization": cfg["normalization"],
         "interpretation": "AUC is a shape diagnostic. Inspect physical yields, signed-loss stability, factor quantiles, weighted mean, and cap fraction separately.",

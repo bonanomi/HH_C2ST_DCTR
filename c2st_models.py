@@ -22,6 +22,7 @@ def build_binary_classifier(
     learning_rate: float,
     batch_normalization: bool = False,
     seed: int = 0,
+    loss: str = "binary_crossentropy",
 ) -> tf.keras.Model:
     """Build the dense binary classifier used by the C2ST/DCTR framework."""
     hidden = tuple(int(n) for n in hidden)
@@ -43,6 +44,6 @@ def build_binary_classifier(
     model = tf.keras.Sequential(layers)
     model.compile(
         optimizer=make_optimizer(optimizer, learning_rate),
-        loss="binary_crossentropy",
+        loss=loss,
     )
     return model

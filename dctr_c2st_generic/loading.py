@@ -212,24 +212,30 @@ def load_side(cfg, side, channel):
 
 
 def prepare_tables(target, base, cfg):
-    """Keep physical tables intact; filter nonpositive weights only for classifiers."""
+    """Keep physical tables intact; select the configured DCTR cohort before assigning splits."""
     if set(target.event_id) & set(base.event_id):
         raise ValueError("Target and base contain the same input rows; independent splits would leak")
     report, result = {}, []
     for side, table in (("target", target), ("base", base)):
         weights = table.weight_before.to_numpy(dtype=np.float64)
-        good = weights > 0
+        if not np.isfinite(weights).all():
+            raise ValueError(f"Nonfinite physical weights: {side}")
+        signed = cfg.get("dctr_objective") == "signed_mse"
+        good = np.ones(len(weights), bool) if signed else weights > 0
         report[side] = {
+            "dctr_population": "all signs" if signed else "positive only",
+            "negative_rows_retained": int(np.count_nonzero(good & (weights < 0))),
+            "zero_rows_retained": int(np.count_nonzero(good & (weights == 0))),
             "full_rows": len(table), "full_signed_sumw": float(weights.sum()),
             "nonpositive_rows_excluded": int((~good).sum()),
-            "nonpositive_absw_fraction": float(np.abs(weights[~good]).sum() / np.abs(weights).sum()) if np.abs(weights).sum() else 0.,
+            "nonpositive_absw_fraction": float(np.abs(weights[weights < 0]).sum() / np.abs(weights).sum()) if np.abs(weights).sum() else 0.,
         }
         selected = table.loc[good].reset_index(drop=True)
         maximum = cfg["max_events_per_class"]
         if maximum is not None and len(selected) > maximum:
             selected = selected.sample(n=maximum, random_state=cfg["seed"]).reset_index(drop=True)
         if len(selected) < 4:
-            raise ValueError(f"Too few positive-weight {side} events")
+            raise ValueError(f"Too few selected {side} events")
         report[side]["classifier_rows"] = len(selected)
         report[side]["classifier_sumw"] = float(selected.weight_before.sum())
         result.append(selected)

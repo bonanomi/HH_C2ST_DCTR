@@ -7,6 +7,7 @@ import re
 import numpy as np
 
 DEFAULTS = {
+    "dctr_objective": "bce",  # signed_mse keeps both physical weight signs
     "subtract_processes": [], "reference_stages": [],
     "regions": None, "region_ids": {}, "channel_ids": {}, "channels": {},
     "selections": {}, "validation_vars": [], "scaler": "hep",
@@ -61,6 +62,10 @@ def validate(user):
         for entry in cfg[f"{side}_processes"].values():
             if entry.get("source", cfg[f"{side}_source"]) not in cfg["sources"]:
                 raise ValueError("Unknown per-process source")
+    if cfg["dctr_objective"] not in ("bce", "signed_mse"):
+        raise ValueError("dctr_objective must be bce or signed_mse")
+    if cfg["compatibility"] and cfg["dctr_objective"] != "bce":
+        raise ValueError("signed_mse requires a generic (non-compatibility) config")
     sub = cfg["subtract_processes"]
     if len(set(sub)) != len(sub) or set(sub) - set(cfg["base_processes"]):
         raise ValueError("subtract_processes must be unique base-process names")
