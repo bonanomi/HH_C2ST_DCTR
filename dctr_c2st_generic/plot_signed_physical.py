@@ -1,4 +1,4 @@
-"""Plot Data/MC24 pt_ll, njet and mll for the full signed training selection.
+"""Plot configured inputs and validation variables for the full signed training selection.
 
 Install in dctr_c2st_generic/ and run from the repository root:
 python -m dctr_c2st_generic.plot_signed_physical --channel-dir RUN/2mu --output NEW_DIR
@@ -24,13 +24,13 @@ import pandas as pd
 from .config import validate, write_json, jsonable
 from .loading import load_side, branch_files, producer_path
 from .plot_year_transfer import draw
+from .observable_specs import observable_names, resolve_observables
 
 
 OBSERVABLES = {
     'mli_ll_pt':dict(edges=np.linspace(0,200,41),label=r'$p_T^{\ell\ell}$ [GeV]',log=False,flow='drop'),
     'mli_n_jet':dict(edges=np.arange(-.5,12.5,1),label='Jet multiplicity',density_per_unit=False,log=False,flow='drop'),
     'mli_mll':dict(edges=np.linspace(0,200,41),label=r'$m_{\ell\ell}$ [GeV]',log=False,flow='drop'),
-    "mli_met_pt": dict(edges=np.linspace(0, 200, 41), label=r"$p_T^{\mathrm{miss}}$ [GeV]", log=False, flow="drop"),
 }
 
 
@@ -178,7 +178,7 @@ def summary(weights, factors):
         factor_quantiles=dict(zip(['0','.01','.5','.99','1'],np.quantile(f,[0,.01,.5,.99,1]))) if len(f) else {})
 
 
-def run(channel_dir, output, chunk_size=65536, save_events=False, cache_dir=None, refresh_cache=False):
+def run(channel_dir, output, chunk_size=65536, save_events=False, cache_dir=None, refresh_cache=False, observables_config=None):
     meta = json.loads((channel_dir/'inference/metadata.json').read_text())
     cfg = validate(meta['config'])
     channel = channel_dir.name
@@ -201,13 +201,16 @@ def run(channel_dir, output, chunk_size=65536, save_events=False, cache_dir=None
     # Extra plotting columns are not model inputs and do not change selections.
     # Keep the original training configuration intact for provenance checks.
     load_cfg = deepcopy(cfg)
-    load_cfg['validation_vars'] = list(dict.fromkeys(
-        cfg['validation_vars'] + [name for name in OBSERVABLES if name not in cfg['features']]))
+    names = observable_names(cfg)
+    overrides = json.loads(Path(observables_config).read_text()) if observables_config else {}
     data = load_signed_cached(load_cfg, 'target', channel, cache_dir, refresh_cache)
     mc = load_signed_cached(load_cfg, 'base', channel, cache_dir, refresh_cache)
-    for name in OBSERVABLES:
+    for name in names:
         if name not in mc or name not in data:
             raise ValueError(f'Required plotting column {name} was not loaded')
+    observables, flow_report = resolve_observables(cfg, data, mc, overrides, OBSERVABLES)
+    write_json(output/'plot_observables.json', observables)
+    write_json(output/'plot_flow_report.json', flow_report)
     if pd.Index(data.event_id).intersection(pd.Index(mc.event_id)).size:
         raise ValueError('Target/base input overlap')
     population = json.loads((channel_dir/'population.json').read_text())
@@ -298,7 +301,7 @@ def run(channel_dir, output, chunk_size=65536, save_events=False, cache_dir=None
                     channel_labels={channel:f'{channel} — full signed sample'},
                     region_labels={region:region},colors={'DY (mumu)':'#e8a01a','DY (ee)':'#ffad05',
                     'DY (tautau)':'#a86f5b','ttbar DL':'#bf2100','ttbb':'#ed6900'})
-    for name,spec in OBSERVABLES.items():
+    for name,spec in observables.items():
         for stage,f in [('nominal',np.ones(len(mc),np.float32)),('dctr',factor)]:
             draw(data,mc,f,name,spec,plot_cfg,'2024',channel,region,stage,output)
     print(json.dumps({key:report[key] for key in ('data_sumw','data_over_mc_before','data_over_mc_after')},indent=2))
@@ -314,10 +317,11 @@ def main():
                    help='Selected signed-table cache; use only a trusted directory')
     p.add_argument('--no-cache',action='store_true',help='Read original inputs without caching')
     p.add_argument('--refresh-cache',action='store_true',help='Rebuild selected-table caches')
+    p.add_argument('--observables-config',type=Path,help='JSON mapping configured variable names to plot overrides')
     a = p.parse_args()
     if a.chunk_size < 1: p.error('--chunk-size must be positive')
     run(a.channel_dir,a.output,a.chunk_size,a.save_events,
-        None if a.no_cache else a.cache_dir,a.refresh_cache)
+        None if a.no_cache else a.cache_dir,a.refresh_cache,a.observables_config)
 
 if __name__ == '__main__':
     main()
