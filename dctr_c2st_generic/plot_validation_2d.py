@@ -38,7 +38,17 @@ def run(root, output, cache):
     features = meta['features']
     if features != cfg['features']:
         raise ValueError('Feature order mismatch')
-    load_cfg = dict(cfg, validation_vars=list(dict.fromkeys(cfg['validation_vars'] + ['mli_ll_pt','mli_n_jet'])))
+    load_cfg = dict(
+        cfg,
+        validation_vars=list(dict.fromkeys(
+                cfg["validation_vars"]
+                + [
+                    name
+                    for name in ("mli_ll_pt", "mli_n_jet")
+                    if name not in cfg["features"]
+                ]
+            )),
+    )
     xe = np.array([0,10,20,30,50,75,100,150,200,400,1000.], float)
     ye = np.arange(.5, 12., 1.)
     shape = (len(xe)-1,len(ye)-1)
