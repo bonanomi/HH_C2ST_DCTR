@@ -49,10 +49,29 @@ def validate_channel(directory, cfg):
     ft, fb = fractions["test_fraction_target"], fractions["test_fraction_base"]
     for j, feature in enumerate(dict.fromkeys(cfg["features"] + cfg["validation_vars"])):
         values = frame[feature].to_numpy(dtype=float)
-        low, high = float(values.min()), float(values.max())
-        if low == high:
-            low, high = low - .5, high + .5
-        edges = np.linspace(low, high, cfg["plot_bins"] + 1)
+        specified = cfg.get("plot_edges", {}).get(feature)
+        if specified is not None:
+            edges = np.asarray(specified, dtype=float)
+            if edges.ndim != 1 or len(edges) < 2 or not np.all(np.isfinite(edges)) or not np.all(np.diff(edges) > 0):
+                raise ValueError(f"Invalid plot_edges for {feature}")
+        else:
+            finite = values[np.isfinite(values)]
+            if not len(finite):
+                raise ValueError(f"No finite values for {feature}")
+            low, high = float(finite.min()), float(finite.max())
+            if low == high:
+                low, high = low - .5, high + .5
+            edges = np.linspace(low, high, cfg["plot_bins"] + 1)
+        # Explicit edges drop under/overflow; report these rather than hiding them.
+        flow = {}
+        for name, mask in (("target", target), ("base", base)):
+            flow[name] = {"rows": int(mask.sum()),
+                          "nonfinite": int(np.sum(mask & ~np.isfinite(values))),
+                          "underflow": int(np.sum(mask & (values < edges[0]))),
+                          "overflow": int(np.sum(mask & (values > edges[-1])))}
+        write_json(plotdir / f"{j:03d}_{filename(feature)}_binning.json",
+                   {"edges": edges.tolist(), "flow": "drop", "counts": flow,
+                    "shape_normalization": "within displayed range"})
         for mode in ("physical", "shape"):
             fig, (ax, ratio) = plt.subplots(2, 1, figsize=(7, 6), sharex=True,
                                           gridspec_kw={"height_ratios": [3, 1]})
@@ -90,8 +109,14 @@ def validate_channel(directory, cfg):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--input", required=True, type=Path)
+    ap.add_argument("--plot-config", type=Path, help="JSON with plot_edges and/or plot_bins overrides; does not edit saved training config")
     args = ap.parse_args()
     cfg = json.loads((args.input / "config.json").read_text())
+    if args.plot_config:
+        overrides = json.loads(args.plot_config.read_text())
+        if set(overrides) - {"plot_edges", "plot_bins"}:
+            raise ValueError("Plot overrides accept only plot_edges and plot_bins")
+        cfg.update(overrides)
     for channel in cfg["channels"]:
         validate_channel(args.input / channel, cfg)
 

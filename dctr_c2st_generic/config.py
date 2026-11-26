@@ -16,7 +16,7 @@ DEFAULTS = {
     "cap_quantile": .995, "eps": 1e-6, "max_events_per_class": None,
     "epochs": 50, "batch_size": 8192, "early_stopping_patience": 5,
     "reduce_lr_patience": 2, "reduce_lr_factor": .2,
-    "save_fold_models": False, "plots": True, "plot_bins": 40,
+    "save_fold_models": False, "plots": True, "plot_bins": 40, "plot_edges": {},
     "dctr_model": {"hidden": [50], "batch_normalization": True,
                    "optimizer": "sgd", "learning_rate": .005},
     "closure_model": {"hidden": [50], "batch_normalization": False,
