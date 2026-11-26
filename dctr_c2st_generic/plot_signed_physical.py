@@ -30,6 +30,7 @@ OBSERVABLES = {
     'mli_ll_pt':dict(edges=np.linspace(0,200,41),label=r'$p_T^{\ell\ell}$ [GeV]',log=False,flow='drop'),
     'mli_n_jet':dict(edges=np.arange(-.5,12.5,1),label='Jet multiplicity',density_per_unit=False,log=False,flow='drop'),
     'mli_mll':dict(edges=np.linspace(0,200,41),label=r'$m_{\ell\ell}$ [GeV]',log=False,flow='drop'),
+    "mli_met_pt": dict(edges=np.linspace(0, 200, 41), label=r"$p_T^{\mathrm{miss}}$ [GeV]", log=False, flow="drop"),
 }
 
 
